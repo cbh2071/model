@@ -14,14 +14,20 @@ from transformers import BertModel, BertTokenizer
 # --- 从 config 导入 ---
 from config import PROTBERT_MODEL_NAME, DEVICE # 使用 config 中定义的设备
 
-# --- 全局加载 Tokenizer (只需一次) ---
-# 放在全局避免在函数内反复加载
-try:
-    print(f"加载 ProtBERT Tokenizer: {PROTBERT_MODEL_NAME}")
-    tokenizer = BertTokenizer.from_pretrained(PROTBERT_MODEL_NAME, do_lower_case=False)
-except Exception as e:
-    print(f"加载 ProtBERT Tokenizer 失败: {e}")
-    tokenizer = None # 设置为 None 以便后续检查
+# --- 全局 Tokenizer 单例 ---
+_tokenizer = None
+
+def get_tokenizer():
+    """获取或创建 ProtBERT Tokenizer 单例"""
+    global _tokenizer
+    if _tokenizer is None:
+        try:
+            print(f"首次加载 ProtBERT Tokenizer: {PROTBERT_MODEL_NAME}")
+            _tokenizer = BertTokenizer.from_pretrained(PROTBERT_MODEL_NAME, do_lower_case=False)
+        except Exception as e:
+            print(f"加载 ProtBERT Tokenizer 失败: {e}")
+            _tokenizer = None
+    return _tokenizer
 
 # --- 特征提取函数 ---
 def extract_protbert_features_batch(
@@ -44,6 +50,7 @@ def extract_protbert_features_batch(
     Returns:
         Dict[str, np.ndarray]: {protein_id: feature_vector}
     """
+    tokenizer = get_tokenizer()
     if tokenizer is None:
         print("错误：ProtBERT Tokenizer 未成功加载，无法提取特征。")
         return {}

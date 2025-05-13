@@ -312,8 +312,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="蛋白质功能预测模型训练脚本")
 
     parser.add_argument('--input_data_file', type=str, default=config.INPUT_DATA_FILE, help='输入数据文件路径 (.xlsx 或 .dat)')
-    parser.add_argument('--target_go_category', type=str, default='MF', choices=['MF', 'BP', 'CC'], help='要预测的 GO 类别 (default: MF)')
-    parser.add_argument('--mapping_strategy', type=str, default='goslim', choices=['goslim', 'custom'], help='标签映射策略 (default: goslim)')
+    parser.add_argument('--target_go_category', type=str, default=config.TARGET_GO_CATEGORY, choices=['MF', 'BP', 'CC'], help='要预测的 GO 类别 (default: MF)')
+    parser.add_argument('--mapping_strategy', type=str, default=config.MAPPING_STRATEGY, choices=['goslim', 'custom'], help='标签映射策略 (default: goslim)')
     parser.add_argument('--batch_size', type=int, default=config.BATCH_SIZE, help=f'批次大小 (default: {config.BATCH_SIZE})')
     parser.add_argument('--num_epochs', type=int, default=config.NUM_EPOCHS, help=f'训练轮数 (default: {config.NUM_EPOCHS})')
     parser.add_argument('--learning_rate', type=float, default=config.LEARNING_RATE, help=f'学习率 (default: {config.LEARNING_RATE})')
