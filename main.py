@@ -375,7 +375,7 @@ if __name__ == "__main__":
     parser.add_argument('--diagnose', action='store_true', help='是否执行映射诊断步骤')
     parser.add_argument('--early_stopping_patience', type=int, default=config.EARLY_STOPPING_PATIENCE, help=f'早停策略的耐心值 (default: {config.EARLY_STOPPING_PATIENCE})')
     parser.add_argument('--early_stopping_min_delta', type=float, default=config.EARLY_STOPPING_MIN_DELTA, help=f'早停策略的最小变化值 (default: {config.EARLY_STOPPING_MIN_DELTA})')
-    parser.add_argument('--checkpoint_dir', type=str, default=config.CHECKPOINT_DIR, help=f'检查点保存目录 (default: {config.CHECKPOINT_DIR})')
+    parser.add_argument('--resume_checkpoint', type=str, default=config.CHECKPOINT_DIR, help=f'检查点保存目录 (default: {config.CHECKPOINT_DIR})')
 
     args = parser.parse_args()
 
