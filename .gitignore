@@ -1,0 +1,7 @@
+/.cursorignore
+/.venv
+/goslim_label_distribution.txt
+/__pycache__
+/protbert_features_cache/
+*.pyc
+

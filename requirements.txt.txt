@@ -1,0 +1,9 @@
+torch>=1.8.0 # 根据你的 CUDA 版本选择合适的 torch 版本
+transformers>=4.10.0
+numpy>=1.19.0
+pandas>=1.2.0
+scikit-learn>=0.24.0
+biopython>=1.78
+goatools>=1.0.0
+tqdm>=4.60.0
+openpyxl>=3.0.0 # 处理 .xlsx 文件
