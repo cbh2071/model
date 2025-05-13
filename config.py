@@ -14,10 +14,12 @@ OBO_FILE = os.path.join(_PROJECT_DIR, "go-basic.obo")           # GO 本体文�
 SLIM_OBO_FILE = os.path.join(_PROJECT_DIR, "goslim_pir.obo") # GO Slim 文件路径
 INPUT_DATA_FILE = os.path.join(_PROJECT_DIR, "dataset_50k.xlsx") # 输入数据文件 (.xlsx 或 .dat)，将在 main.py 通过参数传入
 
+
 # --- 自动生成或固定的路径 ---
 CACHE_DIR = os.path.join(_PROJECT_DIR, "protbert_features_cache") # ProtBERT 特征缓存目录
 MODEL_SAVE_PATH = os.path.join(_PROJECT_DIR, "protein_ensemble_model.pth") # 模型保存路径
 DISTRIBUTION_FILE_PREFIX = os.path.join(_PROJECT_DIR, "") # 标签分布文件保存目录（或加前缀）
+CHECKPOINT_DIR_BASE = os.path.join(_PROJECT_DIR, "checkpoints") # 检查点保存目录
 
 # --- ProtBERT 模型 ---
 PROTBERT_MODEL_NAME = "Rostlab/prot_bert"

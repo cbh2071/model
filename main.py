@@ -247,6 +247,7 @@ def main(args):
         input_dim=config.INPUT_DIM, hidden_dim=config.HIDDEN_DIM,
         output_dim=num_classes, num_layers=config.NUM_LSTM_LAYERS
     )
+    model_bilstm.to(config.DEVICE) # 先移动到设备
     optimizer_bilstm = torch.optim.Adam(model_bilstm.parameters(), lr=args.learning_rate)
     _, _, model_bilstm = train_model(
         model=model_bilstm, train_loader=train_loader, val_loader=val_loader,
@@ -256,11 +257,36 @@ def main(args):
         min_delta=args.early_stopping_min_delta
     )
 
+    start_epoch_bilstm = 0
+    if args.resume_checkpoint and "BiLSTM_Attention" in args.resume_checkpoint: # 简单判断是否是该模型的检查点
+        if os.path.isfile(args.resume_checkpoint):
+            print(f"从检查点加载 BiLSTM+Attention 模型: {args.resume_checkpoint}")
+            checkpoint = torch.load(args.resume_checkpoint, map_location=config.DEVICE) # 加载到指定设备
+            model_bilstm.load_state_dict(checkpoint['model_state_dict'])
+            optimizer_bilstm.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch_bilstm = checkpoint['epoch'] # 下一个epoch从这里开始
+            # best_val_loss_bilstm = checkpoint.get('best_val_loss', float('inf')) # 可选：恢复最佳损失记录
+            print(f"  模型权重和优化器状态已加载。将从 epoch {start_epoch_bilstm + 1} 继续训练。")
+        else:
+            print(f"警告: 指定的检查点文件未找到: {args.resume_checkpoint}")
+
+    _, _, model_bilstm = train_model(
+        model=model_bilstm, train_loader=train_loader, val_loader=val_loader,
+        optimizer=optimizer_bilstm, criterion=criterion,
+        num_epochs=args.num_epochs, # 总 epoch 数不变
+        device=config.DEVICE, model_name="BiLSTM_Attention",
+        patience=args.early_stopping_patience,
+        min_delta=args.early_stopping_min_delta,
+        checkpoint_dir=os.path.join(config.CHECKPOINT_DIR_BASE, "bilstm"), # 为不同模型指定不同检查点子目录
+        start_epoch=start_epoch_bilstm # 传递起始 epoch
+    )
+
     # --- 训练 CNN+BiLSTM ---
     model_cnnlstm = CNN_BiLSTM(
         input_dim=config.INPUT_DIM, hidden_dim=config.HIDDEN_DIM, output_dim=num_classes,
         kernel_size=config.CNN_KERNEL_SIZE, num_layers=1 # 通常 CNN 后 LSTM 层数不需要太多
     )
+    model_cnnlstm.to(config.DEVICE) # 先移动到设备
     optimizer_cnnlstm = torch.optim.Adam(model_cnnlstm.parameters(), lr=args.learning_rate)
     _, _, model_cnnlstm = train_model(
         model=model_cnnlstm, train_loader=train_loader, val_loader=val_loader,
@@ -268,6 +294,29 @@ def main(args):
         device=config.DEVICE, model_name="CNN_BiLSTM",
         patience=args.early_stopping_patience, # 从命令行参数获取
         min_delta=args.early_stopping_min_delta # 从命令行参数获取
+    )
+
+    start_epoch_cnnlstm = 0
+    if args.resume_checkpoint and "CNN_BiLSTM" in args.resume_checkpoint:
+        if os.path.isfile(args.resume_checkpoint):
+            print(f"从检查点加载 CNN_BiLSTM 模型: {args.resume_checkpoint}")
+            checkpoint = torch.load(args.resume_checkpoint, map_location=config.DEVICE)
+            model_cnnlstm.load_state_dict(checkpoint['model_state_dict'])
+            optimizer_cnnlstm.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch_cnnlstm = checkpoint['epoch']
+            print(f"  模型权重和优化器状态已加载。将从 epoch {start_epoch_cnnlstm + 1} 继续训练。")
+        else:
+            print(f"警告: 指定的检查点文件未找到: {args.resume_checkpoint}")
+
+    _, _, model_cnnlstm = train_model(
+        model=model_cnnlstm, train_loader=train_loader, val_loader=val_loader,
+        optimizer=optimizer_cnnlstm, criterion=criterion,
+        num_epochs=args.num_epochs,
+        device=config.DEVICE, model_name="CNN_BiLSTM",
+        patience=args.early_stopping_patience,
+        min_delta=args.early_stopping_min_delta,
+        checkpoint_dir=os.path.join(config.CHECKPOINT_DIR_BASE, "cnnlstm"),
+        start_epoch=start_epoch_cnnlstm
     )
 
     # --- 步骤 9: 集成与评估 ---
@@ -326,6 +375,7 @@ if __name__ == "__main__":
     parser.add_argument('--diagnose', action='store_true', help='是否执行映射诊断步骤')
     parser.add_argument('--early_stopping_patience', type=int, default=config.EARLY_STOPPING_PATIENCE, help=f'早停策略的耐心值 (default: {config.EARLY_STOPPING_PATIENCE})')
     parser.add_argument('--early_stopping_min_delta', type=float, default=config.EARLY_STOPPING_MIN_DELTA, help=f'早停策略的最小变化值 (default: {config.EARLY_STOPPING_MIN_DELTA})')
+    parser.add_argument('--checkpoint_dir', type=str, default=config.CHECKPOINT_DIR, help=f'检查点保存目录 (default: {config.CHECKPOINT_DIR})')
 
     args = parser.parse_args()
 
