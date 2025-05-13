@@ -42,11 +42,13 @@ TARGET_MF_CLASSES = {
 
 # --- 训练参数 ---
 BATCH_SIZE = 16             # 批次大小 (可根据显存调整)
-NUM_EPOCHS = 50             # 训练轮数
+NUM_EPOCHS = 200             # 训练轮数
 LEARNING_RATE = 1e-4
 TEST_SIZE = 0.2             # 测试集比例
 VAL_SIZE = 0.1              # 验证集比例 (在训练集中划分)
 ENSEMBLE_WEIGHT_A = 0.6     # 集成模型中 BiLSTM 的权重 (模型A)
+EARLY_STOPPING_PATIENCE = 7 # 早停策略的耐心值
+EARLY_STOPPING_MIN_DELTA = 0.005 # 早停策略的最小变化值
 
 # --- 模型超参数 ---
 INPUT_DIM = 1024            # ProtBERT 输出特征维度

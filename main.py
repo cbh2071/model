@@ -248,10 +248,12 @@ def main(args):
         output_dim=num_classes, num_layers=config.NUM_LSTM_LAYERS
     )
     optimizer_bilstm = torch.optim.Adam(model_bilstm.parameters(), lr=args.learning_rate)
-    train_model(
+    _, _, model_bilstm = train_model(
         model=model_bilstm, train_loader=train_loader, val_loader=val_loader,
         optimizer=optimizer_bilstm, criterion=criterion, num_epochs=args.num_epochs,
-        device=config.DEVICE, model_name="BiLSTM_Attention"
+        device=config.DEVICE, model_name="BiLSTM_Attention",
+        patience=args.early_stopping_patience,
+        min_delta=args.early_stopping_min_delta
     )
 
     # --- 训练 CNN+BiLSTM ---
@@ -260,10 +262,12 @@ def main(args):
         kernel_size=config.CNN_KERNEL_SIZE, num_layers=1 # 通常 CNN 后 LSTM 层数不需要太多
     )
     optimizer_cnnlstm = torch.optim.Adam(model_cnnlstm.parameters(), lr=args.learning_rate)
-    train_model(
+    _, _, model_cnnlstm = train_model(
         model=model_cnnlstm, train_loader=train_loader, val_loader=val_loader,
         optimizer=optimizer_cnnlstm, criterion=criterion, num_epochs=args.num_epochs,
-        device=config.DEVICE, model_name="CNN_BiLSTM"
+        device=config.DEVICE, model_name="CNN_BiLSTM",
+        patience=args.early_stopping_patience, # 从命令行参数获取
+        min_delta=args.early_stopping_min_delta # 从命令行参数获取
     )
 
     # --- 步骤 9: 集成与评估 ---
@@ -320,6 +324,8 @@ if __name__ == "__main__":
     parser.add_argument('--val_size', type=float, default=config.VAL_SIZE, help=f'验证集比例 (default: {config.VAL_SIZE})')
     parser.add_argument('--ensemble_weight_a', type=float, default=config.ENSEMBLE_WEIGHT_A, help=f'集成模型中模型A(BiLSTM)的权重 (default: {config.ENSEMBLE_WEIGHT_A})')
     parser.add_argument('--diagnose', action='store_true', help='是否执行映射诊断步骤')
+    parser.add_argument('--early_stopping_patience', type=int, default=config.EARLY_STOPPING_PATIENCE, help=f'早停策略的耐心值 (default: {config.EARLY_STOPPING_PATIENCE})')
+    parser.add_argument('--early_stopping_min_delta', type=float, default=config.EARLY_STOPPING_MIN_DELTA, help=f'早停策略的最小变化值 (default: {config.EARLY_STOPPING_MIN_DELTA})')
 
     args = parser.parse_args()
 

@@ -18,46 +18,48 @@ def train_model(
     train_loader: DataLoader,
     val_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
-    criterion: nn.Module, # 预期是 BCEWithLogitsLoss
+    criterion: nn.Module,
     num_epochs: int,
     device: torch.device,
-    model_name: str = "Model"
-) -> Tuple[List[float], List[float]]:
-    """训练单个模型。"""
-    # (代码与之前版本基本相同，确保使用 BCEWithLogitsLoss)
-    print(f"\n--- 开始训练 {model_name} ---")
+    model_name: str = "Model",
+    patience: int = 5, # 新增：Early Stopping 的耐心值
+    min_delta: float = 0.001 # 新增：认为损失改善的最小变化量
+) -> Tuple[List[float], List[float], nn.Module]: # 返回训练好的最佳模型
+    """训练单个模型，并实现 Early Stopping。"""
+    print(f"\n--- 开始训练 {model_name} (Early Stopping: patience={patience}, min_delta={min_delta}) ---")
     model.to(device)
     train_losses = []
     val_losses = []
+
     best_val_loss = float('inf')
+    epochs_no_improve = 0
+    best_model_state_dict = model.state_dict() # 初始化最佳模型状态
 
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [训练]", leave=False)
-
         for features, labels in train_pbar:
+            # ... (训练逻辑不变) ...
             features, labels = features.to(device), labels.to(device)
-
             optimizer.zero_grad()
-            outputs = model(features) # Logits
+            outputs = model(features)
             loss = criterion(outputs, labels)
             loss.backward()
-            # 可选：梯度裁剪
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-
             running_loss += loss.item() * features.size(0)
             train_pbar.set_postfix(loss=loss.item())
 
         epoch_train_loss = running_loss / len(train_loader.dataset)
         train_losses.append(epoch_train_loss)
 
+        # --- 验证阶段 ---
         model.eval()
         val_loss = 0.0
         val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [验证]", leave=False)
         with torch.no_grad():
             for features, labels in val_pbar:
+                # ... (验证逻辑不变) ...
                 features, labels = features.to(device), labels.to(device)
                 outputs = model(features)
                 loss = criterion(outputs, labels)
@@ -69,13 +71,25 @@ def train_model(
 
         print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}")
 
-        if epoch_val_loss < best_val_loss:
-             best_val_loss = epoch_val_loss
-             # 可在这里添加保存最佳模型的逻辑
-             # torch.save(model.state_dict(), f"{model_name}_best_val.pth")
+        # --- Early Stopping 检查 ---
+        if epoch_val_loss < best_val_loss - min_delta: # 损失是否有显著改善
+            best_val_loss = epoch_val_loss
+            epochs_no_improve = 0
+            best_model_state_dict = model.state_dict() # 保存当前最佳模型的状态
+            print(f"  (验证损失改善至 {best_val_loss:.4f}，保存模型状态)")
+        else:
+            epochs_no_improve += 1
+            print(f"  (验证损失未显著改善，连续 {epochs_no_improve} epoch)")
+
+        if epochs_no_improve >= patience:
+            print(f"Early stopping触发：连续 {patience} 个 epochs 验证损失未改善。")
+            break # 提前结束训练
 
     print(f"--- {model_name} 训练完成 ---")
-    return train_losses, val_losses
+    print(f"最佳验证损失: {best_val_loss:.4f}")
+    # 加载最佳模型权重
+    model.load_state_dict(best_model_state_dict)
+    return train_losses, val_losses, model # 返回加载了最佳权重的模型
 
 
 def evaluate_model(
