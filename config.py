@@ -42,7 +42,7 @@ TARGET_MF_CLASSES = {
 
 # --- 训练参数 ---
 BATCH_SIZE = 16             # 批次大小 (可根据显存调整)
-NUM_EPOCHS = 10             # 训练轮数
+NUM_EPOCHS = 50             # 训练轮数
 LEARNING_RATE = 1e-4
 TEST_SIZE = 0.2             # 测试集比例
 VAL_SIZE = 0.1              # 验证集比例 (在训练集中划分)

@@ -2,5 +2,6 @@
 /.venv
 protbert_features_cache/
 __pycache__/
+回收站/
 *.pyc
 

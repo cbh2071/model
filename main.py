@@ -111,7 +111,6 @@ def main(args):
             category_annotations,
             config.TARGET_MF_CLASSES, # 从 config 获取
             go_dag,
-            target_category=args.target_go_category
         )
     else: # Should not happen due to argparse choices
         print(f"错误: 未知的映射策略 '{args.mapping_strategy}'")

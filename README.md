@@ -102,4 +102,8 @@ python main.py --input_data_file <你的数据文件路径> [其他可选参数]
 3.  **调整批次大小为 8，训练轮数为 20：**
     ```bash
     python main.py --input_data_file my_proteins.xlsx --batch_size 8 --num_epochs 20
+
+## 计划
+更灵活的迭代次数与中止兼容
+集成模型的进一步研究与选择
     

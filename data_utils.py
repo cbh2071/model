@@ -278,80 +278,83 @@ def fast_map_to_slim(
 
 
 # --- 自定义类别映射函数 ---
-def get_all_parents_of_term(go_id: str, go2parents: Dict[str, Set[str]], include_self: bool = False) -> Set[str]:
-    """获取给定GO ID的所有父节点（祖先）的ID集合。"""
-    # (代码与之前版本相同)
-    parents_anc = set()
+def get_all_parents_of_term(go_id: str, obo_dag: Dict[str, Set[str]], include_self: bool = False) -> Set[str]:
+    """
+    获取给定GO ID的所有父节点（祖先）的ID集合。
+    """
+    parents = set()
     if include_self:
-        parents_anc.add(go_id)
+        parents.add(go_id)
+    
+    if go_id not in obo_dag:
+        return parents # 如果GO ID不在图中，返回空集合或包含自身的集合
 
-    q = {go_id}
-    visited = set()
+    # 使用一个队列进行广度优先或深度优先搜索来遍历父节点
+    terms_to_visit = {obo_dag[go_id]} # 从当前GO Term对象开始
+    visited_terms = set()
 
-    while q:
-        term_id = q.pop()
-        if term_id not in visited and term_id in go2parents:
-            visited.add(term_id)
-            direct_parents = go2parents[term_id]
-            parents_anc.update(direct_parents)
-            q.update(direct_parents)
-    return parents_anc
+    while terms_to_visit:
+        current_term = terms_to_visit.pop()
+        if current_term in visited_terms:
+            continue
+        visited_terms.add(current_term)
+        
+        # 将当前term的直接父节点加入待访问列表，并将它们的ID加入结果集
+        for parent_term in current_term.parents:
+            parents.add(parent_term.id)
+            if parent_term not in visited_terms: # 避免重复访问已经处理过的父节点
+                 terms_to_visit.add(parent_term)
+    return parents
 
 def map_go_to_custom_classes(
     original_go_annotations_dict: Dict[str, List[str]],
     target_classes_dict: Dict[str, str],
-    go_dag: GODag,
-    target_category: str = 'MF'
+    obo_dag: GODag,
 ) -> Dict[str, List[str]]:
-    """将原始GO注释映射到定义的目标大类上 (基于祖先关系)。"""
-    # (代码与之前版本相同，确保 TARGET_MF_CLASSES 在 config.py 中定义并按需导入)
-    from config import TARGET_MF_CLASSES # 导入自定义类别定义
-    print(f"将注释映射到自定义的 {len(TARGET_MF_CLASSES)} 个大类...")
+    """
+    将原始GO注释字典映射到定义的目标大类上。
+
+    参数:
+        original_go_annotations_dict (dict): {protein_id: [original_go_id1, original_go_id2, ...]}
+        target_classes_dict (dict): {class_name: target_go_id}
+        obo_dag (GODag): 已加载的GO本体对象 (来自goatools)
+
+    返回:
+        mapped_annotations_dict (dict): {protein_id: [target_class_name1, target_class_name2, ...]}
+                                        或者 {protein_id: [bool_vec_for_classes]} 如果你想直接输出二值化
+                                        这里返回类别名称列表更灵活，后续再用MultiLabelBinarizer
+    """
     mapped_annotations_dict = defaultdict(list)
-    target_class_names = list(TARGET_MF_CLASSES.keys())
-    target_class_go_ids = set(TARGET_MF_CLASSES.values())
+    target_class_names = list(target_classes_dict.keys()) # 保持顺序
+    target_class_go_ids = list(target_classes_dict.values())
 
-    # 预计算父子关系
-    # 使用 relationship=True 可能更全，但也可能更慢或包含非 is_a / part_of 关系
-    go2parents_direct = get_go2parents(go_dag.go2obj, optional_attrs={'relationship'})
-
-    # 预计算祖先关系 (仅对输入注释中的 GO ID 计算)
-    unique_input_go_ids = set(gid for go_list in original_go_annotations_dict.values() for gid in go_list)
-    print(f"预计算 {len(unique_input_go_ids)} 个输入 GO ID 的祖先关系...")
-    go2ancestors = {go_id: get_all_parents_of_term(go_id, go2parents_direct, include_self=True)
-                     for go_id in tqdm(unique_input_go_ids, desc="预计算祖先")}
-
-    category_map = {'MF': 'molecular_function', 'BP': 'biological_process', 'CC': 'cellular_component'}
-    target_namespace = category_map.get(target_category)
-
-    for protein_id, original_go_ids in tqdm(original_go_annotations_dict.items(), desc="映射蛋白质注释"):
-        protein_belongs_to_classes = set()
-        if not original_go_ids:
+    for protein_id, original_go_ids in original_go_annotations_dict.items():
+        protein_belongs_to_classes = set() # 用set避免重复添加同一个大类名
+        if not original_go_ids: # 如果某个蛋白没有原始GO注释
             continue
 
         for original_go_id in original_go_ids:
-            if original_go_id not in go_dag:
+            original_term = obo_dag.get(original_go_id)
+            if not original_term: # 如果OBO文件中没有这个原始GO ID（不太可能，但以防万一）
+                # print(f"警告: 原始GO ID {original_go_id} 在OBO文件中未找到。")
                 continue
-            if go_dag[original_go_id].namespace != target_namespace:
-                continue
+            
+            # 获取 original_go_id 的所有祖先（包括它自己）
+            # 注意：get_all_parents_of_term 返回的是ID字符串的集合
+            original_term_ancestors_and_self = get_all_parents_of_term(original_go_id, obo_dag, include_self=True)
 
-            original_term_ancestors_and_self = go2ancestors.get(original_go_id)
-            if original_term_ancestors_and_self is None: # 如果预计算时不存在，现场计算（理论上不应发生）
-                 original_term_ancestors_and_self = get_all_parents_of_term(original_go_id, go2parents_direct, include_self=True)
-
-            matched_target_ids = target_class_go_ids.intersection(original_term_ancestors_and_self)
-
-            for target_id in matched_target_ids:
-                for class_name, go_id_in_dict in TARGET_MF_CLASSES.items():
-                    if go_id_in_dict == target_id:
-                        protein_belongs_to_classes.add(class_name)
-                        break
-
+            for i, target_go_id in enumerate(target_class_go_ids):
+                if target_go_id not in obo_dag:
+                    continue
+                
+                # 判断 target_go_id 是否是 original_go_id 的祖先 (或 original_go_id 本身)
+                if target_go_id in original_term_ancestors_and_self:
+                    protein_belongs_to_classes.add(target_class_names[i])
+        
         if protein_belongs_to_classes:
             mapped_annotations_dict[protein_id] = sorted(list(protein_belongs_to_classes))
 
-    print(f"自定义映射完成，{len(mapped_annotations_dict)} 个蛋白质至少映射到一个大类。")
-    return dict(mapped_annotations_dict)
+    return dict(mapped_annotations_dict)# 标签注释编码
 
 
 # --- 标签编码函数 ---
