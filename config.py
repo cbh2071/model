@@ -20,7 +20,7 @@ CACHE_DIR = os.path.join(_PROJECT_DIR, "protbert_features_cache") # ProtBERT 特
 MODEL_SAVE_PATH = os.path.join(_PROJECT_DIR, "protein_ensemble_model.pth") # 模型保存路径
 DISTRIBUTION_FILE_PREFIX = os.path.join(_PROJECT_DIR, "") # 标签分布文件保存目录（或加前缀）
 CHECKPOINT_DIR = os.path.join(_PROJECT_DIR, "checkpoints") # 检查点保存目录
-
+RESULTS_DIR = os.path.join(_PROJECT_DIR, "results") # 结果保存目录
 # --- ProtBERT 模型 ---
 PROTBERT_MODEL_NAME = "Rostlab/prot_bert"
 

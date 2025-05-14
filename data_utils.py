@@ -234,8 +234,7 @@ def build_go_to_slim_map(go_dag: GODag, slim_terms: Set[str]) -> Dict[str, Set[s
              continue
         node = go_dag[go_id]
         # 查找所有祖先（包括自身）中的 slim terms
-        # 使用 get_ancestors 更准确地包含所有关系
-        slim_ancestors = {p for p in node.get_all_parents() if p in slim_terms}
+        slim_ancestors = get_all_parents_of_term(go_id, go_dag, include_self=True)
         if node.id in slim_terms: # 添加自身（如果自身是 slim）
              slim_ancestors.add(node.id)
 
@@ -258,7 +257,6 @@ def fast_map_to_slim(
     go_to_slim_map: Dict[str, Set[str]]
 ) -> Dict[str, List[str]]:
     """利用预构建的映射字典，将原始 GO 注释快速转换为 GO Slim 注释。"""
-    # (代码与之前版本相同)
     print("将注释映射到 GO Slim...")
     new_annotations = {}
     missing_map_count = 0
@@ -267,12 +265,12 @@ def fast_map_to_slim(
         for go_id in go_ids:
             if go_id in go_to_slim_map:
                 mapped_terms.update(go_to_slim_map[go_id])
-            # else: # 可选：统计有多少原始GO ID没有映射到Slim
-            #     missing_map_count += 1
+            else: # 可选：统计有多少原始GO ID没有映射到Slim
+                missing_map_count += 1
         if mapped_terms:
             new_annotations[prot_id] = sorted(list(mapped_terms))
-    # if missing_map_count > 0:
-    #     print(f"  警告: {missing_map_count} 个原始 GO ID 未在映射表中找到对应的 Slim Term。")
+    if missing_map_count > 0:
+        print(f"  警告: {missing_map_count} 个原始 GO ID 未在映射表中找到对应的 Slim Term。")
     print(f"映射完成，{len(new_annotations)} 个蛋白质至少映射到一个 Slim Term。")
     return new_annotations
 
@@ -290,7 +288,7 @@ def get_all_parents_of_term(go_id: str, obo_dag: Dict[str, Set[str]], include_se
         return parents # 如果GO ID不在图中，返回空集合或包含自身的集合
 
     # 使用一个队列进行广度优先或深度优先搜索来遍历父节点
-    terms_to_visit = {obo_dag[go_id]} # 从当前GO Term对象开始
+    terms_to_visit = {obo_dag[go_id].id} # 从当前GO Term的ID开始
     visited_terms = set()
 
     while terms_to_visit:
@@ -300,10 +298,10 @@ def get_all_parents_of_term(go_id: str, obo_dag: Dict[str, Set[str]], include_se
         visited_terms.add(current_term)
         
         # 将当前term的直接父节点加入待访问列表，并将它们的ID加入结果集
-        for parent_term in current_term.parents:
+        for parent_term in obo_dag[current_term].parents:
             parents.add(parent_term.id)
-            if parent_term not in visited_terms: # 避免重复访问已经处理过的父节点
-                 terms_to_visit.add(parent_term)
+            if parent_term.id not in visited_terms: # 避免重复访问已经处理过的父节点
+                 terms_to_visit.add(parent_term.id)
     return parents
 
 def map_go_to_custom_classes(

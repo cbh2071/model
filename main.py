@@ -147,6 +147,33 @@ def main(args):
     dist_file = os.path.join(config.DISTRIBUTION_FILE_PREFIX, f"{args.mapping_strategy}_label_distribution.txt")
     save_label_distribution(encoded_labels, mlb, output_file=dist_file)
 
+    print("\n--- 计算用于代价敏感学习的 pos_weight ---")
+    if encoded_labels.size > 0 and encoded_labels.shape[1] > 0:
+        # 我们需要在训练集上计算 pos_weight，以避免数据泄露到验证集和测试集
+        # 这里假设 encoded_labels 是完整的标签集，我们将使用 train_labels 来计算
+        # （在数据划分步骤 7 之后，我们会有 train_labels）
+
+        # 为了演示，我们先用 encoded_labels (所有标签) 计算一个示例，
+        # 但理想情况下，应在 train_idx 确定后再用 train_labels 计算
+        # num_samples_total = encoded_labels.shape[0]
+        # num_positive_total = encoded_labels.sum(axis=0) # 每个类别的正例数
+        # num_negative_total = num_samples_total - num_positive_total # 每个类别的负例数
+
+        # # 添加一个小的 epsilon 防止除以零
+        # epsilon = 1e-6
+        # pos_weight_values_total = num_negative_total / (num_positive_total + epsilon)
+        # pos_weight_tensor_total = torch.tensor(pos_weight_values_total, dtype=torch.float32).to(config.DEVICE)
+        # print(f"基于 전체 데이터셋 계산된 pos_weight (仅供参考): {pos_weight_values_total[:10]}...") # 打印前10个
+
+        # --- 更正：在训练集上计算 pos_weight ---
+        # 这部分逻辑应该在数据划分到 train_idx, val_idx, test_idx 之后
+        # 我们将在下面训练模型前重新计算基于 train_labels 的 pos_weight
+        pos_weight_tensor = None # 初始化
+
+    else:
+        print("警告: 没有有效的编码标签来计算 pos_weight。")
+        pos_weight_tensor = None
+
     # --- 步骤 6: 提取/加载 ProtBERT 特征 ---
     print("\n--- 步骤 6: 提取/加载 ProtBERT 特征 ---")
     final_sequences_ordered_dict = {pid: final_sequences_dict[pid] for pid in ordered_ids}
@@ -238,9 +265,45 @@ def main(args):
 
     print(f"数据集划分: 训练集 {len(train_dataset)}, 验证集 {len(val_dataset)}, 测试集 {len(test_dataset)}")
 
+    # --- 在训练模型前，基于训练集计算 pos_weight ---
+    if train_labels.size > 0 and train_labels.shape[1] > 0:
+        print("\n--- 基于训练集计算 pos_weight ---")
+        num_train_samples = train_labels.shape[0]
+        num_positive_train = train_labels.sum(axis=0)
+        num_negative_train = num_train_samples - num_positive_train
+        epsilon = 1e-6
+        pos_weight_values_train = num_negative_train / (num_positive_train + epsilon)
+
+        # 检查是否有极端值 (例如，某个类别在训练集中完全没有正例或负例)
+        # 如果 num_positive_train[i] 为 0, pos_weight_values_train[i] 会非常大。
+        # 对权重进行裁剪或设置一个上限，防止过大的权重导致训练不稳定。
+        pos_weight_values_train = np.clip(pos_weight_values_train, a_min=1.0, a_max=100.0)
+        # 或者如果一个类别没有正例，其权重可以设为1（不加权）或一个较大的固定值。
+        for i in range(len(pos_weight_values_train)):
+            if num_positive_train[i] == 0:
+                print(f"警告: 类别 '{mlb.classes_[i]}' 在训练集中没有正样本。pos_weight 将被设为 1.0。")
+                pos_weight_values_train[i] = 1.0 # 或者一个预设的最大值
+            elif num_negative_train[i] == 0: # 虽然不太可能，但以防万一
+                print(f"警告: 类别 '{mlb.classes_[i]}' 在训练集中没有负样本。pos_weight 将被设为 1.0。")
+                pos_weight_values_train[i] = 1.0
+
+
+        pos_weight_tensor = torch.tensor(pos_weight_values_train, dtype=torch.float32).to(config.DEVICE)
+        print(f"基于训练集计算得到的 pos_weight (前10个): {pos_weight_values_train[:10]}")
+        print(f"pos_weight 张量设备: {pos_weight_tensor.device}")
+    else:
+        print("警告: 训练集标签无效，无法计算 pos_weight。将不使用类别权重。")
+        pos_weight_tensor = None
+
     # --- 步骤 8: 模型初始化与训练 ---
     print("\n--- 步骤 8: 模型初始化与训练 ---")
-    criterion = nn.BCEWithLogitsLoss() # 多标签分类损失
+    
+    if pos_weight_tensor is not None:
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+        print("损失函数 BCEWithLogitsLoss 已配置类别权重 (pos_weight)。")
+    else:
+        criterion = nn.BCEWithLogitsLoss()
+        print("损失函数 BCEWithLogitsLoss 未配置类别权重。")
 
     # --- 训练 BiLSTM+Attention ---
     model_bilstm = BiLSTMAttention(
@@ -277,7 +340,7 @@ def main(args):
         device=config.DEVICE, model_name="BiLSTM_Attention",
         patience=args.early_stopping_patience,
         min_delta=args.early_stopping_min_delta,
-        checkpoint_dir=os.path.join(config.CHECKPOINT_DIR_BASE, "bilstm"), # 为不同模型指定不同检查点子目录
+        checkpoint_dir=os.path.join(config.CHECKPOINT_DIR, "bilstm"), # 为不同模型指定不同检查点子目录
         start_epoch=start_epoch_bilstm # 传递起始 epoch
     )
 
@@ -315,7 +378,7 @@ def main(args):
         device=config.DEVICE, model_name="CNN_BiLSTM",
         patience=args.early_stopping_patience,
         min_delta=args.early_stopping_min_delta,
-        checkpoint_dir=os.path.join(config.CHECKPOINT_DIR_BASE, "cnnlstm"),
+        checkpoint_dir=os.path.join(config.CHECKPOINT_DIR, "cnnlstm"),
         start_epoch=start_epoch_cnnlstm
     )
 
@@ -334,6 +397,15 @@ def main(args):
     print(f"  - Sample-based F1: {sample_f1:.4f}")
     print(f"  - Micro F1: {micro_f1:.4f}")
     print(f"  - Weighted F1: {weighted_f1:.4f}")
+    print(f"  - 类别 F1: {class_f1_dict}")
+
+    # 保存测试结果
+    with open(os.path.join(config.RESULTS_DIR, "test_results.txt"), "w") as f:
+        f.write(f"测试损失: {test_loss:.4f}\n")
+        f.write(f"Sample-based F1: {sample_f1:.4f}\n")
+        f.write(f"Micro F1: {micro_f1:.4f}\n")
+        f.write(f"Weighted F1: {weighted_f1:.4f}\n")
+        f.write(f"类别 F1: {class_f1_dict}\n")
 
     # --- 步骤 10: 保存模型 ---
     print(f"\n--- 步骤 10: 保存模型到 {config.MODEL_SAVE_PATH} ---")
