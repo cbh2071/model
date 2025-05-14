@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from datetime import datetime
+import pickle
+from typing import Tuple, List, Dict
 
 # --- 导入自定义模块 ---
 project_root = os.path.dirname(os.path.abspath(__file__))
@@ -76,148 +78,90 @@ def plot_pr_curve(precision_dict, recall_dict, pr_auc_dict, class_names, model_n
     plt.savefig(f"pr_curve_{model_name.replace(' ', '_')}.png")
     plt.show()
 
+def load_prepared_test_data(data_dir: str) -> Tuple[List[str], List[np.ndarray], np.ndarray, object]:
+    """加载预处理好的测试数据"""
+    ids = np.load(os.path.join(data_dir, "test_ids.npy"), allow_pickle=True).tolist()
+    features_loaded = np.load(os.path.join(data_dir, "test_features.npy"), allow_pickle=True)
+    features_list = [feat for feat in features_loaded]
+    labels = np.load(os.path.join(data_dir, "test_labels.npy"), allow_pickle=True)
+    
+    mlb_path = os.path.join(data_dir, "mlb_encoder.pkl")
+    if not os.path.exists(mlb_path):
+        raise FileNotFoundError(f"MLB 编码器文件未找到于 {mlb_path}")
+    with open(mlb_path, 'rb') as f:
+        mlb = pickle.load(f)
+    return ids, features_list, labels, mlb
 
-def evaluate_saved_model(model_path: str, test_data_file: str, args_from_training):
-    print(f"--- 加载模型和评估测试集: {test_data_file} ---")
-    print(f"使用模型文件: {model_path}")
+def evaluate_on_fixed_test_set(model_checkpoint_path: str, prepared_data_dir: str, args_eval):
+    """在固定的测试集上评估模型"""
+    print(f"--- 在固定的测试集上评估模型 ---")
+    print(f"使用模型文件: {model_checkpoint_path}")
+    print(f"使用预处理数据目录: {prepared_data_dir}")
 
-    if not os.path.exists(model_path):
-        print(f"错误: 模型文件未找到 {model_path}")
+    if not os.path.exists(model_checkpoint_path):
+        print(f"错误: 模型文件未找到 {model_checkpoint_path}")
+        return
+    if not os.path.exists(prepared_data_dir):
+        print(f"错误: 预处理数据目录未找到 {prepared_data_dir}")
         return
 
-    # 1. 加载检查点
-    checkpoint = torch.load(model_path, map_location=config.DEVICE)
-    mlb = checkpoint['mlb']
-    ordered_ids = checkpoint.get('ordered_ids', None)  # 获取保存的ordered_ids
+    # 1. 加载模型检查点
+    checkpoint = torch.load(model_checkpoint_path, map_location=config.DEVICE)
     model_params = checkpoint['model_params']
-    training_args = checkpoint.get('training_args', {})  # 获取保存的训练参数
-    num_classes = model_params['output_dim']
+    num_classes_from_model = model_params['output_dim']
 
-    # 使用保存的训练参数更新args_from_training
-    for key, value in training_args.items():
-        if hasattr(args_from_training, key):
-            setattr(args_from_training, key, value)
+    # 2. 加载测试数据和MLB
+    test_ids, test_features, test_labels, mlb = load_prepared_test_data(prepared_data_dir)
+    
+    if num_classes_from_model != len(mlb.classes_):
+        print(f"警告: 模型输出维度 ({num_classes_from_model}) 与MLB类别数 ({len(mlb.classes_)}) 不匹配!")
+    num_classes = len(mlb.classes_)
 
-    print(f"模型参数加载完成。类别数: {num_classes}")
-    print(f"标签编码器 (mlb) 类别: {mlb.classes_}")
-
-    # 2. 重新实例化模型
+    # 3. 初始化模型
     model_bilstm = BiLSTMAttention(
-        input_dim=model_params['input_dim'], hidden_dim=model_params['hidden_dim'],
-        output_dim=num_classes, num_layers=model_params['num_lstm_layers']
+        input_dim=model_params['input_dim'],
+        hidden_dim=model_params['hidden_dim'],
+        output_dim=num_classes,
+        num_layers=model_params['num_lstm_layers']
     )
     model_cnnlstm = CNN_BiLSTM(
-        input_dim=model_params['input_dim'], hidden_dim=model_params['hidden_dim'],
-        output_dim=num_classes, kernel_size=model_params['cnn_kernel_size']
+        input_dim=model_params['input_dim'],
+        hidden_dim=model_params['hidden_dim'],
+        output_dim=num_classes,
+        kernel_size=model_params['cnn_kernel_size']
     )
 
     model_bilstm.load_state_dict(checkpoint['model_bilstm_state_dict'])
     model_cnnlstm.load_state_dict(checkpoint['model_cnnlstm_state_dict'])
 
-    ensemble_model = EnsembleModel(model_bilstm, model_cnnlstm, weightA=model_params['ensemble_weight_a'])
+    ensemble_model = EnsembleModel(
+        model_bilstm,
+        model_cnnlstm,
+        weightA=model_params['ensemble_weight_a']
+    )
     if 'ensemble_model_state_dict' in checkpoint:
-         ensemble_model.load_state_dict(checkpoint['ensemble_model_state_dict'])
+        ensemble_model.load_state_dict(checkpoint['ensemble_model_state_dict'])
 
-    models_to_evaluate = {
-        "BiLSTM_Attention": model_bilstm,
-        "CNN_BiLSTM": model_cnnlstm,
-        "Ensemble_Model": ensemble_model
-    }
+    # 4. 准备要评估的模型
+    models_to_evaluate = {"Ensemble_Model": ensemble_model}
+    if args_eval.eval_individual_models:
+        models_to_evaluate["BiLSTM_Attention"] = model_bilstm
+        models_to_evaluate["CNN_BiLSTM"] = model_cnnlstm
 
-    for model_name, model_instance in models_to_evaluate.items():
-        model_instance.to(config.DEVICE)
-        model_instance.eval()
+    for model_name, model in models_to_evaluate.items():
+        model.to(config.DEVICE)
+        model.eval()
 
-    # 3. 准备测试数据
-    print("\n--- 准备测试数据 ---")
-    go_dag = GODag(config.OBO_FILE, optional_attrs={'relationship'})
-    slim_terms = None
-    if args_from_training.mapping_strategy == 'goslim':
-        slim_dag = GODag(config.SLIM_OBO_FILE)
-        slim_terms = set(slim_dag.keys())
-
-    file_ext = os.path.splitext(test_data_file)[1].lower()
-    if file_ext == '.dat':
-        sequences, go_annotations, go_categories = parse_uniprot_dat(test_data_file)
-    elif file_ext in ['.xlsx', '.xls']:
-        sequences, go_annotations, go_categories = load_data_from_excel(test_data_file)
-    else:
-        print(f"错误: 不支持的测试数据文件格式 {file_ext}")
-        return
-
-    # 执行与训练时相同的筛选和映射
-    all_prot_ids = set(sequences.keys())
-    for prot_id in all_prot_ids:
-        if prot_id not in go_categories:
-            go_categories[prot_id] = {'MF': [], 'BP': [], 'CC': []}
-        if prot_id not in go_annotations and prot_id in go_categories:
-            all_ids_in_cats = set(go for cat_list in go_categories[prot_id].values() for go in cat_list)
-            if all_ids_in_cats:
-                go_annotations[prot_id] = list(all_ids_in_cats)
-
-    category_annotations = filter_annotations_by_category(
-        go_annotations, go_categories, args_from_training.target_go_category, go_dag
+    # 5. 创建测试数据加载器
+    test_dataset = ProteinFeatureDataset(test_ids, test_features, test_labels)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args_eval.batch_size_eval,
+        shuffle=False,
+        num_workers=0
     )
 
-    if args_from_training.mapping_strategy == 'goslim':
-        go_to_slim_map = build_go_to_slim_map(go_dag, slim_terms)
-        final_mapped_annotations = fast_map_to_slim(category_annotations, go_to_slim_map)
-    elif args_from_training.mapping_strategy == 'custom':
-        final_mapped_annotations = map_go_to_custom_classes(
-            category_annotations, config.TARGET_MF_CLASSES, go_dag
-        )
-    else:
-        print("错误：未知的映射策略")
-        return
-
-    # 使用加载的mlb直接转换标签
-    test_protein_ids = []
-    test_labels_original_format = []
-    for pid, mapped_gos in final_mapped_annotations.items():
-        if pid in sequences:
-            test_protein_ids.append(pid)
-            test_labels_original_format.append(mapped_gos)
-
-    if not test_protein_ids:
-        print("错误: 测试数据经过处理后没有剩余样本。")
-        return
-
-    try:
-        test_encoded_labels = mlb.transform(test_labels_original_format).astype(np.float32)
-    except ValueError as e:
-        print(f"错误: 使用加载的MLB对象转换测试集标签时出错: {e}")
-        print("这可能意味着测试集中的标签与训练时MLB学习到的类别不完全一致。")
-        print(f"MLB类别: {mlb.classes_}")
-        return
-
-    # 提取特征
-    test_sequences_dict = {pid: sequences[pid] for pid in test_protein_ids}
-    test_features_dict = extract_protbert_features_batch(
-        test_sequences_dict, config.CACHE_DIR, args_from_training.batch_size,
-        config.MAX_SEQ_LENGTH, config.DEVICE
-    )
-
-    # 对齐特征和标签
-    aligned_test_features = []
-    aligned_test_labels = []
-    final_test_ids = []
-    for i, pid in enumerate(test_protein_ids):
-        if pid in test_features_dict:
-            aligned_test_features.append(test_features_dict[pid])
-            aligned_test_labels.append(test_encoded_labels[i])
-            final_test_ids.append(pid)
-
-    if not final_test_ids:
-        print("错误：测试特征提取或对齐后没有样本。")
-        return
-
-    test_encoded_labels_aligned = np.array(aligned_test_labels)
-    test_dataset = ProteinFeatureDataset(final_test_ids, aligned_test_features, test_encoded_labels_aligned)
-    test_loader = DataLoader(test_dataset, batch_size=args_from_training.batch_size, shuffle=False)
-
-    print(f"测试数据准备完成。样本数: {len(test_dataset)}")
-
-    # 4. 评估模型
+    # 6. 评估模型
     print("\n--- 开始评估模型 ---")
     results = {}
     for model_name, model in models_to_evaluate.items():
@@ -243,25 +187,25 @@ def evaluate_saved_model(model_path: str, test_data_file: str, args_from_trainin
         for i in range(num_classes):
             class_name = mlb.classes_[i]
             metrics[class_name] = {
-                'precision': precision_score(all_labels[:, i], all_predictions[:, i] > 0.5),
-                'recall': recall_score(all_labels[:, i], all_predictions[:, i] > 0.5),
-                'f1': f1_score(all_labels[:, i], all_predictions[:, i] > 0.5),
+                'precision': precision_score(all_labels[:, i], all_predictions[:, i] > args_eval.prediction_threshold),
+                'recall': recall_score(all_labels[:, i], all_predictions[:, i] > args_eval.prediction_threshold),
+                'f1': f1_score(all_labels[:, i], all_predictions[:, i] > args_eval.prediction_threshold),
                 'auc': roc_auc_score(all_labels[:, i], all_predictions[:, i])
             }
         
         # 计算宏平均指标
         metrics['macro_avg'] = {
-            'precision': precision_score(all_labels, all_predictions > 0.5, average='macro'),
-            'recall': recall_score(all_labels, all_predictions > 0.5, average='macro'),
-            'f1': f1_score(all_labels, all_predictions > 0.5, average='macro'),
+            'precision': precision_score(all_labels, all_predictions > args_eval.prediction_threshold, average='macro'),
+            'recall': recall_score(all_labels, all_predictions > args_eval.prediction_threshold, average='macro'),
+            'f1': f1_score(all_labels, all_predictions > args_eval.prediction_threshold, average='macro'),
             'auc': roc_auc_score(all_labels, all_predictions, average='macro')
         }
         
         # 计算微平均指标
         metrics['micro_avg'] = {
-            'precision': precision_score(all_labels, all_predictions > 0.5, average='micro'),
-            'recall': recall_score(all_labels, all_predictions > 0.5, average='micro'),
-            'f1': f1_score(all_labels, all_predictions > 0.5, average='micro'),
+            'precision': precision_score(all_labels, all_predictions > args_eval.prediction_threshold, average='micro'),
+            'recall': recall_score(all_labels, all_predictions > args_eval.prediction_threshold, average='micro'),
+            'f1': f1_score(all_labels, all_predictions > args_eval.prediction_threshold, average='micro'),
             'auc': roc_auc_score(all_labels, all_predictions, average='micro')
         }
         
@@ -280,8 +224,8 @@ def evaluate_saved_model(model_path: str, test_data_file: str, args_from_trainin
         print(f"  F1: {metrics['micro_avg']['f1']:.4f}")
         print(f"  AUC: {metrics['micro_avg']['auc']:.4f}")
     
-    # 5. 保存评估结果
-    results_dir = os.path.join(os.path.dirname(model_path), 'evaluation_results')
+    # 7. 保存评估结果
+    results_dir = os.path.join(os.path.dirname(model_checkpoint_path), 'evaluation_results')
     os.makedirs(results_dir, exist_ok=True)
     
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -308,42 +252,13 @@ class NpEncoder(json.JSONEncoder):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="加载训练好的模型并进行评估")
-    parser.add_argument('--model_path', type=str, required=True, help='已训练模型的 .pth 文件路径')
-    parser.add_argument('--test_data_file', type=str, required=True, help='测试数据文件路径 (.xlsx 或 .dat)')
-    # 传递与训练时一致的数据处理参数
-    parser.add_argument('--input_data_file', type=str, default=config.INPUT_DATA_FILE, help='输入数据文件路径 (.xlsx 或 .dat)')
-    parser.add_argument('--target_go_category', type=str, default=config.TARGET_GO_CATEGORY, choices=['MF', 'BP', 'CC'], help='要预测的 GO 类别 (default: MF)')
-    parser.add_argument('--mapping_strategy', type=str, default=config.MAPPING_STRATEGY, choices=['goslim', 'custom'], help='标签映射策略 (default: goslim)')
-    parser.add_argument('--batch_size', type=int, default=config.BATCH_SIZE, help=f'批次大小 (default: {config.BATCH_SIZE})')
-    parser.add_argument('--num_epochs', type=int, default=config.NUM_EPOCHS, help=f'训练轮数 (default: {config.NUM_EPOCHS})')
-    parser.add_argument('--learning_rate', type=float, default=config.LEARNING_RATE, help=f'学习率 (default: {config.LEARNING_RATE})')
-    parser.add_argument('--test_size', type=float, default=config.TEST_SIZE, help=f'测试集比例 (default: {config.TEST_SIZE})')
-    parser.add_argument('--val_size', type=float, default=config.VAL_SIZE, help=f'验证集比例 (default: {config.VAL_SIZE})')
-    parser.add_argument('--ensemble_weight_a', type=float, default=config.ENSEMBLE_WEIGHT_A, help=f'集成模型中模型A(BiLSTM)的权重 (default: {config.ENSEMBLE_WEIGHT_A})')
-    parser.add_argument('--diagnose', action='store_true', help='是否执行映射诊断步骤')
-    parser.add_argument('--early_stopping_patience', type=int, default=config.EARLY_STOPPING_PATIENCE, help=f'早停策略的耐心值 (default: {config.EARLY_STOPPING_PATIENCE})')
-    parser.add_argument('--early_stopping_min_delta', type=float, default=config.EARLY_STOPPING_MIN_DELTA, help=f'早停策略的最小变化值 (default: {config.EARLY_STOPPING_MIN_DELTA})')
-    parser.add_argument('--resume_checkpoint', type=str, default=config.CHECKPOINT_DIR, help=f'检查点保存目录 (default: {config.CHECKPOINT_DIR})')
-    parser.add_argument('--lr_scheduler', type=str, default=config.LR_SCHEDULER, choices=['none', 'step', 'cosine', 'reducelronplateau'], help='选择学习率调度器策略')
-    parser.add_argument('--lr_step_size', type=int, default=config.LR_STEP_SIZE, help='StepLR 的 step_size')
-    parser.add_argument('--lr_gamma', type=float, default=config.LR_GAMMA, help='StepLR/ExponentialLR 的 gamma')
-    parser.add_argument('--lr_patience', type=int, default=config.LR_PATIENCE, help='ReduceLROnPlateau 的 patience')
-    parser.add_argument('--lr_factor', type=float, default=config.LR_FACTOR, help='ReduceLROnPlateau 的 factor')
+    parser = argparse.ArgumentParser(description="在固定的预处理测试集上评估已训练的模型")
+    parser.add_argument('--model_checkpoint_path', type=str, required=True, help='已训练模型的.pth文件路径')
+    parser.add_argument('--prepared_data_dir', type=str, required=True, help='包含预处理和划分好的数据的目录')
+    parser.add_argument('--batch_size_eval', type=int, default=config.BATCH_SIZE, help='评估时的批次大小')
+    parser.add_argument('--prediction_threshold', type=float, default=0.5, help='多标签预测的概率阈值')
+    parser.add_argument('--eval_individual_models', action='store_true', help='是否也评估检查点中的单个基模型')
 
-
-    cli_args = parser.parse_args()
-
-    # 创建一个模拟的 args 对象，就像训练时使用的那样，包含数据处理的配置
-    # 这样 evaluate_saved_model 可以使用与训练时一致的配置
-    # 你可能需要从保存的 checkpoint['training_args'] 中加载这些参数
-    # 这里我们简化为直接从命令行获取或使用默认值
-    training_args_mock = argparse.Namespace(
-        target_go_category=cli_args.target_go_category,
-        mapping_strategy=cli_args.mapping_strategy,
-        go_col_name=cli_args.go_col_name, # 确保这个与训练时一致
-        batch_size=cli_args.batch_size
-        # 其他在数据准备或特征提取中可能用到的参数...
-    )
-
-    evaluate_saved_model(cli_args.model_path, cli_args.test_data_file, training_args_mock)
+    cli_args_eval = parser.parse_args()
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    evaluate_on_fixed_test_set(cli_args_eval.model_checkpoint_path, cli_args_eval.prepared_data_dir, cli_args_eval)

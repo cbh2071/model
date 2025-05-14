@@ -1,314 +1,120 @@
 # -*- coding: utf-8 -*-
 """
-主执行脚本：蛋白质功能预测流程编排。
+主执行脚本：基于预处理数据进行模型训练。
 """
 import argparse
 import os
 import sys
-from typing import Dict, List, Tuple
-from collections import Counter
-
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from sklearn.model_selection import train_test_split
-from goatools.obo_parser import GODag
 import pickle
-from tqdm import tqdm
+from typing import List, Tuple
 
 # --- 导入自定义模块 ---
-# 添加项目根目录到 Python 路径，以便导入模块
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
 
-import config # 导入配置
-from data_utils import ( # 导入数据处理函数
-    parse_uniprot_dat, load_data_from_excel, filter_annotations_by_category,
-    build_go_to_slim_map, fast_map_to_slim, map_go_to_custom_classes,
-    encode_annotations, save_label_distribution, diagnose_mapping
-)
-from feature_extractor import extract_protbert_features_batch # 导入特征提取器
-from datasets import ProteinFeatureDataset # 导入 Dataset
-from models import BiLSTMAttention, CNN_BiLSTM, EnsembleModel # 导入模型
-from training_utils import train_model, evaluate_model # 导入训练/评估工具
+import config
+from datasets import ProteinFeatureDataset
+from models import BiLSTMAttention, CNN_BiLSTM, EnsembleModel
+from training_utils import train_model
 
 def load_prepared_data(data_dir: str, split_name: str) -> Tuple[List[str], List[np.ndarray], np.ndarray]:
     """加载预处理和划分好的数据"""
-    ids = np.load(os.path.join(data_dir, f"{split_name}_ids.npy"), allow_pickle=True).tolist()
-    features = np.load(os.path.join(data_dir, f"{split_name}_features.npy"), allow_pickle=True)
-    features_list = [feat for feat in features]
-    labels = np.load(os.path.join(data_dir, f"{split_name}_labels.npy"), allow_pickle=True)
+    ids_path = os.path.join(data_dir, f"{split_name}_ids.npy")
+    features_path = os.path.join(data_dir, f"{split_name}_features.npy")
+    labels_path = os.path.join(data_dir, f"{split_name}_labels.npy")
+
+    if not all(os.path.exists(p) for p in [ids_path, features_path, labels_path]):
+        raise FileNotFoundError(f"错误: {split_name} 的数据文件在 {data_dir} 中未完全找到。请先运行 prepare_data_and_split.py。")
+
+    ids = np.load(ids_path, allow_pickle=True).tolist()
+    features_loaded = np.load(features_path, allow_pickle=True)
+    features_list = [feat for feat in features_loaded]
+    labels = np.load(labels_path, allow_pickle=True)
     return ids, features_list, labels
 
 def main(args):
-    """主执行流程"""
-    print("--- 蛋白质功能预测任务启动 ---")
+    """主执行流程 (训练模型)"""
+    print("--- 基于预处理数据进行模型训练 ---")
     print(f"使用设备: {config.DEVICE}")
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
 
-    # --- 步骤 1: 加载 GO 本体和 Slim 文件 ---
-    print("\n--- 步骤 1: 加载 GO 本体文件 ---")
+    # --- 步骤 1: 加载预处理和划分好的训练集和验证集数据 ---
+    print(f"\n--- 从 '{args.prepared_data_dir}' 加载训练和验证数据 ---")
     try:
-        go_dag = GODag(config.OBO_FILE, optional_attrs={'relationship'})
-        if args.mapping_strategy == 'goslim':
-            slim_dag = GODag(config.SLIM_OBO_FILE)
-            slim_terms = set(slim_dag.keys())
-            print(f"Slim OBO 文件加载成功 ({len(slim_terms)} terms)。")
-        print(f"基础 OBO 文件加载成功 ({len(go_dag)} terms)。")
+        train_ids, train_features, train_labels = load_prepared_data(args.prepared_data_dir, "train")
+        val_ids, val_features, val_labels = load_prepared_data(args.prepared_data_dir, "validation")
     except FileNotFoundError as e:
-        print(f"错误: OBO 文件未找到: {e}")
-        return
-    except Exception as e:
-        print(f"加载 OBO 文件时出错: {e}")
+        print(e)
         return
 
-    # --- 步骤 2: 加载输入数据 ---
-    print(f"\n--- 步骤 2: 加载输入数据 ({args.input_data_file}) ---")
-    file_ext = os.path.splitext(args.input_data_file)[1].lower()
-    sequences: Dict[str, str]
-    go_annotations: Dict[str, List[str]]
-    go_categories: Dict[str, Dict[str, List[str]]]
-
-    if file_ext == '.dat':
-        sequences, go_annotations, go_categories = parse_uniprot_dat(args.input_data_file)
-    elif file_ext in ['.xlsx', '.xls']:
-        sequences, go_annotations, go_categories = load_data_from_excel(
-            args.input_data_file
-            # 可根据需要传递 id_col, seq_col, go_col 参数
-        )
-    else:
-        print(f"错误: 不支持的文件格式 '{file_ext}'。请提供 .dat 或 .xlsx 文件。")
+    if not train_ids or not val_ids:
+        print("错误：未能加载训练或验证数据。")
         return
 
-    if not sequences:
-        print("错误: 未能从输入文件加载任何序列数据。")
+    # 加载 MLB 编码器
+    mlb_path = os.path.join(args.prepared_data_dir, "mlb_encoder.pkl")
+    if not os.path.exists(mlb_path):
+        print(f"错误: MLB 编码器文件未找到于 {mlb_path}")
         return
+    with open(mlb_path, 'rb') as f:
+        mlb = pickle.load(f)
+    num_classes = len(mlb.classes_)
+    print(f"MLB 加载完成，类别数: {num_classes}, 类别: {mlb.classes_}")
 
-    # --- 步骤 3: 按类别筛选注释 ---
-    print(f"\n--- 步骤 3: 按类别 '{args.target_go_category}' 筛选注释 ---")
-    # 确保 go_categories 覆盖所有序列 ID
-    all_prot_ids = set(sequences.keys())
-    for prot_id in all_prot_ids:
-        if prot_id not in go_categories:
-            go_categories[prot_id] = {'MF': [], 'BP': [], 'CC': []}
-        # 补充 go_annotations (如果 Excel 加载时没提取)
-        if prot_id not in go_annotations and prot_id in go_categories:
-            all_ids_in_cats = set(go for cat_list in go_categories[prot_id].values() for go in cat_list)
-            if all_ids_in_cats:
-                 go_annotations[prot_id] = list(all_ids_in_cats)
-
-    category_annotations = filter_annotations_by_category(
-        go_annotations, # 传入所有GO注释
-        go_categories,
-        args.target_go_category,
-        go_dag # 传入 OBO 文件用于推断
-    )
-
-    valid_protein_ids_cat = set(category_annotations.keys())
-    print(f"筛选后，{len(valid_protein_ids_cat)} 个蛋白质具有 '{args.target_go_category}' 注释。")
-    if not valid_protein_ids_cat:
-        print("错误: 筛选后没有蛋白质剩下。")
-        return
-
-    # --- 步骤 4: GO Slim 或 自定义 映射 ---
-    print(f"\n--- 步骤 4: 使用 '{args.mapping_strategy}' 策略进行标签映射 ---")
-    final_mapped_annotations: Dict[str, List[str]]
-    if args.mapping_strategy == 'goslim':
-        go_to_slim_map = build_go_to_slim_map(go_dag, slim_terms)
-        final_mapped_annotations = fast_map_to_slim(category_annotations, go_to_slim_map)
-    elif args.mapping_strategy == 'custom':
-        final_mapped_annotations = map_go_to_custom_classes(
-            category_annotations,
-            config.TARGET_MF_CLASSES, # 从 config 获取
-            go_dag,
-        )
-    else: # Should not happen due to argparse choices
-        print(f"错误: 未知的映射策略 '{args.mapping_strategy}'")
-        return
-
-    valid_protein_ids_mapped = set(final_mapped_annotations.keys())
-    print(f"映射后，{len(valid_protein_ids_mapped)} 个蛋白质至少有一个最终类别标签。")
-
-    final_protein_ids = list(valid_protein_ids_mapped)
-    if not final_protein_ids:
-        print("错误: 没有蛋白质在映射后保留下来。无法继续。")
-        return
-
-    final_sequences_dict = {pid: sequences[pid] for pid in final_protein_ids if pid in sequences}
-    print(f"最终用于模型训练的蛋白质数量: {len(final_protein_ids)}")
-
-    # --- (可选) 诊断映射结果 ---
-    if args.diagnose:
-        diagnose_mapping(category_annotations, final_mapped_annotations, go_dag, num_samples=5)
-
-    # --- 步骤 5: 编码标签 ---
-    print("\n--- 步骤 5: 编码最终标签 ---")
-    ordered_ids, encoded_labels, mlb = encode_annotations(final_mapped_annotations)
-
-    if encoded_labels.size == 0:
-        print("错误: 标签编码失败。")
-        return
-
-    num_classes = encoded_labels.shape[1]
-    print(f"标签编码完成，类别数: {num_classes} ({len(mlb.classes_)} unique labels)")
-    print(f"类别列表: {mlb.classes_}")
-
-    # 保存标签分布
-    dist_file = os.path.join(config.DISTRIBUTION_FILE_PREFIX, f"{args.mapping_strategy}_label_distribution.txt")
-    save_label_distribution(encoded_labels, mlb, output_file=dist_file)
-
-    print("\n--- 计算用于代价敏感学习的 pos_weight ---")
-    if encoded_labels.size > 0 and encoded_labels.shape[1] > 0:
-        # 我们需要在训练集上计算 pos_weight，以避免数据泄露到验证集和测试集
-        # 这里假设 encoded_labels 是完整的标签集，我们将使用 train_labels 来计算
-        # （在数据划分步骤 7 之后，我们会有 train_labels）
-
-        # 为了演示，我们先用 encoded_labels (所有标签) 计算一个示例，
-        # 但理想情况下，应在 train_idx 确定后再用 train_labels 计算
-        # num_samples_total = encoded_labels.shape[0]
-        # num_positive_total = encoded_labels.sum(axis=0) # 每个类别的正例数
-        # num_negative_total = num_samples_total - num_positive_total # 每个类别的负例数
-
-        # # 添加一个小的 epsilon 防止除以零
-        # epsilon = 1e-6
-        # pos_weight_values_total = num_negative_total / (num_positive_total + epsilon)
-        # pos_weight_tensor_total = torch.tensor(pos_weight_values_total, dtype=torch.float32).to(config.DEVICE)
-        # print(f"基于 전체 데이터셋 계산된 pos_weight (仅供参考): {pos_weight_values_total[:10]}...") # 打印前10个
-
-        # --- 更正：在训练集上计算 pos_weight ---
-        # 这部分逻辑应该在数据划分到 train_idx, val_idx, test_idx 之后
-        # 我们将在下面训练模型前重新计算基于 train_labels 的 pos_weight
-        pos_weight_tensor = None # 初始化
-
-    else:
-        print("警告: 没有有效的编码标签来计算 pos_weight。")
-        pos_weight_tensor = None
-
-    # --- 步骤 6: 提取/加载 ProtBERT 特征 ---
-    print("\n--- 步骤 6: 提取/加载 ProtBERT 特征 ---")
-    final_sequences_ordered_dict = {pid: final_sequences_dict[pid] for pid in ordered_ids}
-    features_dict = extract_protbert_features_batch(
-        final_sequences_ordered_dict,
-        cache_dir=config.CACHE_DIR,
-        batch_size=args.batch_size, # 使用命令行传入的 batch size
-        max_length=config.MAX_SEQ_LENGTH,
-        device=config.DEVICE
-    )
-
-    if len(features_dict) != len(ordered_ids):
-        print(f"警告: 特征提取/加载后的蛋白质数量 ({len(features_dict)}) 与标签数量 ({len(ordered_ids)}) 不匹配。进行对齐...")
-        valid_ids_after_feature = list(set(ordered_ids).intersection(features_dict.keys()))
-        if not valid_ids_after_feature:
-            print("错误：特征提取后没有有效的蛋白质。")
-            return
-        id_to_index = {pid: i for i, pid in enumerate(ordered_ids)}
-        indices_to_keep = [id_to_index[pid] for pid in valid_ids_after_feature]
-        encoded_labels = encoded_labels[indices_to_keep]
-        ordered_ids = valid_ids_after_feature # 更新 ID 列表
-        print(f"对齐后，有效蛋白质数量：{len(ordered_ids)}")
-    # 确保特征列表顺序与更新后的 ordered_ids 一致
-    features_list = [features_dict[pid] for pid in ordered_ids]
-
-
-    # --- 步骤 7: 准备数据集和数据加载器 ---
-    print("\n--- 步骤 7: 准备数据集和数据加载器 ---")
-    num_samples = len(ordered_ids)
-    indices = np.arange(num_samples)
-
-    # 尝试分层划分 (如果标签是 one-hot 或单标签形式)
-    # 对于多标签，简单的argmax分层可能不是最优，但可以尝试
-    stratify_labels = None
-    if num_samples > 1 and len(encoded_labels.shape) > 1 and encoded_labels.shape[1] > 0 :
-        # 尝试使用标签组合作为分层依据 (如果组合数不多)
-        try:
-             label_tuples = [tuple(row) for row in encoded_labels]
-             label_counts = Counter(label_tuples)
-             # 只对出现次数超过 1 次的标签组合进行分层
-             if len(label_counts) < num_samples / 2: # 启发式：组合数不过多
-                 stratify_labels = label_tuples
-             else: # 否则退化为按第一个标签分层
-                 print("标签组合过多，尝试按第一个标签分层...")
-                 stratify_labels = encoded_labels.argmax(1)
-        except Exception as e:
-             print(f"生成分层标签时出错: {e}. 使用非分层划分。")
-             stratify_labels = None
-    elif num_samples > 1 and len(encoded_labels.shape) == 1: # 单标签情况
-         stratify_labels = encoded_labels
-
-    try:
-        train_val_idx, test_idx = train_test_split(
-            indices, test_size=args.test_size, random_state=42,
-            stratify=stratify_labels
-        )
-        # 为验证集再次计算分层标签
-        stratify_val = None
-        if stratify_labels is not None:
-            stratify_val = [stratify_labels[i] for i in train_val_idx]
-
-        train_idx, val_idx = train_test_split(
-            train_val_idx, test_size=args.val_size / (1 - args.test_size), random_state=42,
-            stratify=stratify_val
-        )
-    except ValueError as e:
-         print(f"警告: 分层划分失败 ({e})。将使用非分层划分。")
-         train_val_idx, test_idx = train_test_split(indices, test_size=args.test_size, random_state=42)
-         train_idx, val_idx = train_test_split(train_val_idx, test_size=args.val_size / (1 - args.test_size), random_state=42)
-
-    train_features = [features_list[i] for i in train_idx]
-    train_labels = encoded_labels[train_idx]
-    train_ids = [ordered_ids[i] for i in train_idx]
+    # --- 步骤 2: 创建 Dataset 和 DataLoader ---
+    print("\n--- 创建 Dataset 和 DataLoader ---")
     train_dataset = ProteinFeatureDataset(train_ids, train_features, train_labels)
-
-    val_features = [features_list[i] for i in val_idx]
-    val_labels = encoded_labels[val_idx]
-    val_ids = [ordered_ids[i] for i in val_idx]
     val_dataset = ProteinFeatureDataset(val_ids, val_features, val_labels)
 
-    test_features = [features_list[i] for i in test_idx]
-    test_labels = encoded_labels[test_idx]
-    test_ids = [ordered_ids[i] for i in test_idx]
-    test_dataset = ProteinFeatureDataset(test_ids, test_features, test_labels)
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=args.batch_size, 
+        shuffle=True, 
+        num_workers=0, 
+        pin_memory=True if config.DEVICE.type == 'cuda' else False
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=args.batch_size, 
+        shuffle=False, 
+        num_workers=0, 
+        pin_memory=True if config.DEVICE.type == 'cuda' else False
+    )
+    print(f"数据集加载: 训练集 {len(train_dataset)}, 验证集 {len(val_dataset)}")
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
-
-    print(f"数据集划分: 训练集 {len(train_dataset)}, 验证集 {len(val_dataset)}, 测试集 {len(test_dataset)}")
-
-    # --- 在训练模型前，基于训练集计算 pos_weight ---
+    # --- 步骤 3: 计算 pos_weight ---
+    pos_weight_tensor = None
     if train_labels.size > 0 and train_labels.shape[1] > 0:
-        print("\n--- 基于训练集计算 pos_weight ---")
+        print("\n--- 基于加载的训练集计算 pos_weight ---")
         num_train_samples = train_labels.shape[0]
         num_positive_train = train_labels.sum(axis=0)
         num_negative_train = num_train_samples - num_positive_train
         epsilon = 1e-6
         pos_weight_values_train = num_negative_train / (num_positive_train + epsilon)
-
-        # 检查是否有极端值 (例如，某个类别在训练集中完全没有正例或负例)
-        # 如果 num_positive_train[i] 为 0, pos_weight_values_train[i] 会非常大。
-        # 对权重进行裁剪或设置一个上限，防止过大的权重导致训练不稳定。
         pos_weight_values_train = np.clip(pos_weight_values_train, a_min=1.0, a_max=100.0)
-        # 或者如果一个类别没有正例，其权重可以设为1（不加权）或一个较大的固定值。
+        
         for i in range(len(pos_weight_values_train)):
             if num_positive_train[i] == 0:
                 print(f"警告: 类别 '{mlb.classes_[i]}' 在训练集中没有正样本。pos_weight 将被设为 1.0。")
-                pos_weight_values_train[i] = 1.0 # 或者一个预设的最大值
-            elif num_negative_train[i] == 0: # 虽然不太可能，但以防万一
+                pos_weight_values_train[i] = 1.0
+            elif num_negative_train[i] == 0:
                 print(f"警告: 类别 '{mlb.classes_[i]}' 在训练集中没有负样本。pos_weight 将被设为 1.0。")
                 pos_weight_values_train[i] = 1.0
 
-        alpha = config.ALPHA # 或者 1.2 等，可以尝试不同的值
+        alpha = config.ALPHA
         pos_weight_values_train_scaled = pos_weight_values_train * alpha
         pos_weight_tensor = torch.tensor(pos_weight_values_train_scaled, dtype=torch.float32).to(config.DEVICE)
-        print(f"基于训练集计算得到的 pos_weight (前10个): {pos_weight_values_train[:10]}")
-        print(f"pos_weight 张量设备: {pos_weight_tensor.device}")
+        print(f"基于训练集计算得到的 pos_weight (scaled, 前10个): {pos_weight_values_train_scaled[:10]}")
     else:
-        print("警告: 训练集标签无效，无法计算 pos_weight。将不使用类别权重。")
-        pos_weight_tensor = None
+        print("警告: 训练集标签无效，无法计算 pos_weight。")
 
-    # --- 步骤 8: 模型初始化与训练 ---
-    print("\n--- 步骤 8: 模型初始化与训练 ---")
-    
+    # --- 步骤 4: 模型初始化与训练 ---
+    print("\n--- 模型初始化与训练 ---")
     if pos_weight_tensor is not None:
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
         print("损失函数 BCEWithLogitsLoss 已配置类别权重 (pos_weight)。")
@@ -318,10 +124,12 @@ def main(args):
 
     # --- 训练 BiLSTM+Attention ---
     model_bilstm = BiLSTMAttention(
-        input_dim=config.INPUT_DIM, hidden_dim=config.HIDDEN_DIM,
-        output_dim=num_classes, num_layers=config.NUM_LSTM_LAYERS
+        input_dim=config.INPUT_DIM,
+        hidden_dim=config.HIDDEN_DIM,
+        output_dim=num_classes,
+        num_layers=config.NUM_LSTM_LAYERS
     )
-    model_bilstm.to(config.DEVICE) # 先移动到设备
+    model_bilstm.to(config.DEVICE)
     optimizer_bilstm = torch.optim.Adam(model_bilstm.parameters(), lr=args.learning_rate)
 
     # 添加学习率调度器
@@ -331,41 +139,49 @@ def main(args):
     elif args.lr_scheduler == 'cosine':
         scheduler_bilstm = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_bilstm, T_max=args.num_epochs, eta_min=1e-6)
     elif args.lr_scheduler == 'reducelronplateau':
-        scheduler_bilstm = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_bilstm, mode='min', factor=args.lr_factor,
-                                             patience=args.lr_patience, verbose=True, min_lr=1e-7)
+        scheduler_bilstm = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer_bilstm, mode='min', factor=args.lr_factor,
+            patience=args.lr_patience, min_lr=1e-7
+        )
 
     start_epoch_bilstm = 0
-    if args.resume_checkpoint and "BiLSTM_Attention" in args.resume_checkpoint: # 简单判断是否是该模型的检查点
-        if os.path.isfile(args.resume_checkpoint):
-            print(f"从检查点加载 BiLSTM+Attention 模型: {args.resume_checkpoint}")
-            checkpoint = torch.load(args.resume_checkpoint, map_location=config.DEVICE) # 加载到指定设备
-            model_bilstm.load_state_dict(checkpoint['model_state_dict'])
-            optimizer_bilstm.load_state_dict(checkpoint['optimizer_state_dict'])
-            if scheduler_bilstm is not None and 'scheduler_state_dict' in checkpoint:
-                scheduler_bilstm.load_state_dict(checkpoint['scheduler_state_dict'])
-            start_epoch_bilstm = checkpoint['epoch'] # 下一个epoch从这里开始
-            print(f"  模型权重和优化器状态已加载。将从 epoch {start_epoch_bilstm + 1} 继续训练。")
-        else:
-            print(f"警告: 指定的检查点文件未找到: {args.resume_checkpoint}")
+    if args.resume_checkpoint_bilstm and os.path.isfile(args.resume_checkpoint_bilstm):
+        print(f"从检查点加载 BiLSTM+Attention 模型: {args.resume_checkpoint_bilstm}")
+        checkpoint = torch.load(args.resume_checkpoint_bilstm, map_location=config.DEVICE)
+        model_bilstm.load_state_dict(checkpoint['model_state_dict'])
+        optimizer_bilstm.load_state_dict(checkpoint['optimizer_state_dict'])
+        if scheduler_bilstm is not None and 'scheduler_state_dict' in checkpoint:
+            scheduler_bilstm.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch_bilstm = checkpoint['epoch']
+        print(f"  模型权重和优化器状态已加载。将从 epoch {start_epoch_bilstm + 1} 继续训练。")
+
+    checkpoint_dir_bilstm = os.path.join(config.CHECKPOINT_DIR, "bilstm_from_prepared_data")
+    os.makedirs(checkpoint_dir_bilstm, exist_ok=True)
 
     _, train_losses_bilstm, val_losses_bilstm, model_bilstm = train_model(
-        model=model_bilstm, train_loader=train_loader, val_loader=val_loader,
-        optimizer=optimizer_bilstm, criterion=criterion,
-        num_epochs=args.num_epochs, # 总 epoch 数不变
-        device=config.DEVICE, model_name="BiLSTM_Attention",
+        model=model_bilstm,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        optimizer=optimizer_bilstm,
+        criterion=criterion,
+        num_epochs=args.num_epochs,
+        device=config.DEVICE,
+        model_name="BiLSTM_Attention",
         patience=args.early_stopping_patience,
         min_delta=args.early_stopping_min_delta,
-        checkpoint_dir=os.path.join(config.CHECKPOINT_DIR, "bilstm"), # 为不同模型指定不同检查点子目录
-        start_epoch=start_epoch_bilstm, # 传递起始 epoch
-        scheduler=scheduler_bilstm # 添加学习率调度器
+        checkpoint_dir=checkpoint_dir_bilstm,
+        start_epoch=start_epoch_bilstm,
+        scheduler=scheduler_bilstm
     )
 
     # --- 训练 CNN+BiLSTM ---
     model_cnnlstm = CNN_BiLSTM(
-        input_dim=config.INPUT_DIM, hidden_dim=config.HIDDEN_DIM, output_dim=num_classes,
-        kernel_size=config.CNN_KERNEL_SIZE, num_layers=1 # 通常 CNN 后 LSTM 层数不需要太多
+        input_dim=config.INPUT_DIM,
+        hidden_dim=config.HIDDEN_DIM,
+        output_dim=num_classes,
+        kernel_size=config.CNN_KERNEL_SIZE
     )
-    model_cnnlstm.to(config.DEVICE) # 先移动到设备
+    model_cnnlstm.to(config.DEVICE)
     optimizer_cnnlstm = torch.optim.Adam(model_cnnlstm.parameters(), lr=args.learning_rate)
 
     # 添加学习率调度器
@@ -375,123 +191,98 @@ def main(args):
     elif args.lr_scheduler == 'cosine':
         scheduler_cnnlstm = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_cnnlstm, T_max=args.num_epochs, eta_min=1e-6)
     elif args.lr_scheduler == 'reducelronplateau':
-        scheduler_cnnlstm = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_cnnlstm, mode='min', factor=args.lr_factor,
-                                             patience=args.lr_patience, verbose=True, min_lr=1e-7)
+        scheduler_cnnlstm = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer_cnnlstm, mode='min', factor=args.lr_factor,
+            patience=args.lr_patience, min_lr=1e-7
+        )
 
     start_epoch_cnnlstm = 0
-    if args.resume_checkpoint and "CNN_BiLSTM" in args.resume_checkpoint:
-        if os.path.isfile(args.resume_checkpoint):
-            print(f"从检查点加载 CNN_BiLSTM 模型: {args.resume_checkpoint}")
-            checkpoint = torch.load(args.resume_checkpoint, map_location=config.DEVICE)
-            model_cnnlstm.load_state_dict(checkpoint['model_state_dict'])
-            optimizer_cnnlstm.load_state_dict(checkpoint['optimizer_state_dict'])
-            if scheduler_cnnlstm is not None and 'scheduler_state_dict' in checkpoint:
-                scheduler_cnnlstm.load_state_dict(checkpoint['scheduler_state_dict'])
-            start_epoch_cnnlstm = checkpoint['epoch']
-            print(f"  模型权重和优化器状态已加载。将从 epoch {start_epoch_cnnlstm + 1} 继续训练。")
-        else:
-            print(f"警告: 指定的检查点文件未找到: {args.resume_checkpoint}")
+    if args.resume_checkpoint_cnnlstm and os.path.isfile(args.resume_checkpoint_cnnlstm):
+        print(f"从检查点加载 CNN_BiLSTM 模型: {args.resume_checkpoint_cnnlstm}")
+        checkpoint = torch.load(args.resume_checkpoint_cnnlstm, map_location=config.DEVICE)
+        model_cnnlstm.load_state_dict(checkpoint['model_state_dict'])
+        optimizer_cnnlstm.load_state_dict(checkpoint['optimizer_state_dict'])
+        if scheduler_cnnlstm is not None and 'scheduler_state_dict' in checkpoint:
+            scheduler_cnnlstm.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch_cnnlstm = checkpoint['epoch']
+        print(f"  模型权重和优化器状态已加载。将从 epoch {start_epoch_cnnlstm + 1} 继续训练。")
+
+    checkpoint_dir_cnnlstm = os.path.join(config.CHECKPOINT_DIR, "cnnlstm_from_prepared_data")
+    os.makedirs(checkpoint_dir_cnnlstm, exist_ok=True)
 
     _, train_losses_cnnlstm, val_losses_cnnlstm, model_cnnlstm = train_model(
-        model=model_cnnlstm, train_loader=train_loader, val_loader=val_loader,
-        optimizer=optimizer_cnnlstm, criterion=criterion,
+        model=model_cnnlstm,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        optimizer=optimizer_cnnlstm,
+        criterion=criterion,
         num_epochs=args.num_epochs,
-        device=config.DEVICE, model_name="CNN_BiLSTM",
+        device=config.DEVICE,
+        model_name="CNN_BiLSTM",
         patience=args.early_stopping_patience,
         min_delta=args.early_stopping_min_delta,
-        checkpoint_dir=os.path.join(config.CHECKPOINT_DIR, "cnnlstm"),
+        checkpoint_dir=checkpoint_dir_cnnlstm,
         start_epoch=start_epoch_cnnlstm,
-        scheduler=scheduler_cnnlstm # 添加学习率调度器
+        scheduler=scheduler_cnnlstm
     )
 
-    # --- 步骤 9: 集成与评估 ---
-    print("\n--- 步骤 9: 集成模型与最终评估 ---")
-    ensemble_model = EnsembleModel(model_bilstm, model_cnnlstm, weightA=args.ensemble_weight_a)
-    ensemble_model.to(config.DEVICE)
+    # --- 步骤 5: 保存最终训练好的模型 ---
+    print(f"\n--- 保存最终训练模型到 {config.MODEL_SAVE_PATH} (基于固定划分训练) ---")
+    final_model_save_path = config.MODEL_SAVE_PATH.replace(".pth", "_from_prepared_data.pth")
+    
+    save_dict = {
+        'mlb': mlb,
+        'model_params': {
+            'input_dim': config.INPUT_DIM,
+            'hidden_dim': config.HIDDEN_DIM,
+            'output_dim': num_classes,
+            'num_lstm_layers': config.NUM_LSTM_LAYERS,
+            'cnn_kernel_size': config.CNN_KERNEL_SIZE,
+            'ensemble_weight_a': args.ensemble_weight_a
+        },
+        'training_args': vars(args)
+    }
+    
+    if model_bilstm:
+        save_dict['model_bilstm_state_dict'] = model_bilstm.state_dict()
+    if model_cnnlstm:
+        save_dict['model_cnnlstm_state_dict'] = model_cnnlstm.state_dict()
 
-    test_loss, sample_f1, micro_f1, weighted_f1, class_f1_dict = evaluate_model(
-        model=ensemble_model, test_loader=test_loader, criterion=criterion,
-        device=config.DEVICE, mlb=mlb
-    )
+    # 创建并保存集成模型状态
+    if model_bilstm and model_cnnlstm:
+        ensemble_model = EnsembleModel(model_bilstm, model_cnnlstm, weightA=args.ensemble_weight_a)
+        save_dict['ensemble_model_state_dict'] = ensemble_model.state_dict()
 
-    print("\n--- 最终集成模型测试结果 ---")
-    print(f"  - 平均测试损失: {test_loss:.4f}")
-    print(f"  - Sample-based F1: {sample_f1:.4f}")
-    print(f"  - Micro F1: {micro_f1:.4f}")
-    print(f"  - Weighted F1: {weighted_f1:.4f}")
-    print(f"  - 类别 F1: {class_f1_dict}")
+    torch.save(save_dict, final_model_save_path)
+    print(f"模型和MLB已保存到 {final_model_save_path}")
 
-    # 保存测试结果
-    with open(os.path.join(config.RESULTS_DIR, "test_results.txt"), "w") as f:
-        f.write(f"测试损失: {test_loss:.4f}\n")
-        f.write(f"Sample-based F1: {sample_f1:.4f}\n")
-        f.write(f"Micro F1: {micro_f1:.4f}\n")
-        f.write(f"Weighted F1: {weighted_f1:.4f}\n")
-        f.write(f"类别 F1: {class_f1_dict}\n")
+    # 保存训练和验证损失
+    np.save(os.path.join(config.OUTPUT_DIR, "bilstm_train_losses.npy"), np.array(train_losses_bilstm))
+    np.save(os.path.join(config.OUTPUT_DIR, "bilstm_val_losses.npy"), np.array(val_losses_bilstm))
+    np.save(os.path.join(config.OUTPUT_DIR, "cnnlstm_train_losses.npy"), np.array(train_losses_cnnlstm))
+    np.save(os.path.join(config.OUTPUT_DIR, "cnnlstm_val_losses.npy"), np.array(val_losses_cnnlstm))
 
-    # --- 步骤 10: 保存模型 ---
-    print(f"\n--- 步骤 10: 保存模型到 {config.MODEL_SAVE_PATH} ---")
-    try:
-        # 保存训练和验证损失
-        os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-        np.save(os.path.join(config.OUTPUT_DIR, "bilstm_train_losses.npy"), np.array(train_losses_bilstm))
-        np.save(os.path.join(config.OUTPUT_DIR, "bilstm_val_losses.npy"), np.array(val_losses_bilstm))
-        np.save(os.path.join(config.OUTPUT_DIR, "cnnlstm_train_losses.npy"), np.array(train_losses_cnnlstm))
-        np.save(os.path.join(config.OUTPUT_DIR, "cnnlstm_val_losses.npy"), np.array(val_losses_cnnlstm))
+    print("\n--- 训练流程完成 ---")
 
-        torch.save({
-            'model_bilstm_state_dict': model_bilstm.state_dict(),
-            'model_cnnlstm_state_dict': model_cnnlstm.state_dict(),
-            'ensemble_model_state_dict': ensemble_model.state_dict(),
-            'mlb': mlb,
-            'ordered_ids': ordered_ids,  # 保存用于数据划分的ID顺序
-            'model_params': {
-                'input_dim': config.INPUT_DIM, 'hidden_dim': config.HIDDEN_DIM,
-                'output_dim': num_classes, 'num_lstm_layers': config.NUM_LSTM_LAYERS,
-                'cnn_kernel_size': config.CNN_KERNEL_SIZE,
-                'ensemble_weight_a': args.ensemble_weight_a
-            },
-            'mapping_strategy': args.mapping_strategy,
-            'target_go_category': args.target_go_category,
-            'training_args': vars(args),  # 保存训练参数
-        }, config.MODEL_SAVE_PATH)
-        print("模型和标签编码器保存成功。")
-    except Exception as e:
-        print(f"保存模型时出错: {e}")
-
-    print("\n--- 任务完成 ---")
-
-
-# --- 主程序入口 ---
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="蛋白质功能预测模型训练脚本")
+    parser = argparse.ArgumentParser(description="基于预处理数据进行模型训练的脚本")
+    parser.add_argument('--prepared_data_dir', type=str, default=config.PREPARED_DATA_DIR, help='预处理和划分好的数据目录')
+    # 训练相关参数
+    parser.add_argument('--batch_size', type=int, default=config.BATCH_SIZE)
+    parser.add_argument('--num_epochs', type=int, default=config.NUM_EPOCHS)
+    parser.add_argument('--learning_rate', type=float, default=config.LEARNING_RATE)
+    parser.add_argument('--ensemble_weight_a', type=float, default=config.ENSEMBLE_WEIGHT_A)
+    parser.add_argument('--early_stopping_patience', type=int, default=config.EARLY_STOPPING_PATIENCE)
+    parser.add_argument('--early_stopping_min_delta', type=float, default=config.EARLY_STOPPING_MIN_DELTA)
+    parser.add_argument('--resume_checkpoint_bilstm', type=str, default=config.RESUME_CHECKPOINT_BILSTM, help='BiLSTM检查点路径')
+    parser.add_argument('--resume_checkpoint_cnnlstm', type=str, default=config.RESUME_CHECKPOINT_CNNLSTM, help='CNN_BiLSTM检查点路径')
+    parser.add_argument('--lr_scheduler', type=str, default=config.LR_SCHEDULER, 
+                        choices=['none', 'step', 'cosine', 'reducelronplateau'])
+    parser.add_argument('--lr_step_size', type=int, default=config.LR_STEP_SIZE)
+    parser.add_argument('--lr_gamma', type=float, default=config.LR_GAMMA)
+    parser.add_argument('--lr_patience', type=int, default=config.LR_PATIENCE)
+    parser.add_argument('--lr_factor', type=float, default=config.LR_FACTOR)
 
-    parser.add_argument('--input_data_file', type=str, default=config.INPUT_DATA_FILE, help='输入数据文件路径 (.xlsx 或 .dat)')
-    parser.add_argument('--target_go_category', type=str, default=config.TARGET_GO_CATEGORY, choices=['MF', 'BP', 'CC'], help='要预测的 GO 类别 (default: MF)')
-    parser.add_argument('--mapping_strategy', type=str, default=config.MAPPING_STRATEGY, choices=['goslim', 'custom'], help='标签映射策略 (default: goslim)')
-    parser.add_argument('--batch_size', type=int, default=config.BATCH_SIZE, help=f'批次大小 (default: {config.BATCH_SIZE})')
-    parser.add_argument('--num_epochs', type=int, default=config.NUM_EPOCHS, help=f'训练轮数 (default: {config.NUM_EPOCHS})')
-    parser.add_argument('--learning_rate', type=float, default=config.LEARNING_RATE, help=f'学习率 (default: {config.LEARNING_RATE})')
-    parser.add_argument('--test_size', type=float, default=config.TEST_SIZE, help=f'测试集比例 (default: {config.TEST_SIZE})')
-    parser.add_argument('--val_size', type=float, default=config.VAL_SIZE, help=f'验证集比例 (default: {config.VAL_SIZE})')
-    parser.add_argument('--ensemble_weight_a', type=float, default=config.ENSEMBLE_WEIGHT_A, help=f'集成模型中模型A(BiLSTM)的权重 (default: {config.ENSEMBLE_WEIGHT_A})')
-    parser.add_argument('--diagnose', action='store_true', help='是否执行映射诊断步骤')
-    parser.add_argument('--early_stopping_patience', type=int, default=config.EARLY_STOPPING_PATIENCE, help=f'早停策略的耐心值 (default: {config.EARLY_STOPPING_PATIENCE})')
-    parser.add_argument('--early_stopping_min_delta', type=float, default=config.EARLY_STOPPING_MIN_DELTA, help=f'早停策略的最小变化值 (default: {config.EARLY_STOPPING_MIN_DELTA})')
-    parser.add_argument('--resume_checkpoint', type=str, default=config.CHECKPOINT_DIR, help=f'检查点保存目录 (default: {config.CHECKPOINT_DIR})')
-    parser.add_argument('--lr_scheduler', type=str, default=config.LR_SCHEDULER, choices=['none', 'step', 'cosine', 'reducelronplateau'], help='选择学习率调度器策略')
-    parser.add_argument('--lr_step_size', type=int, default=config.LR_STEP_SIZE, help='StepLR 的 step_size')
-    parser.add_argument('--lr_gamma', type=float, default=config.LR_GAMMA, help='StepLR/ExponentialLR 的 gamma')
-    parser.add_argument('--lr_patience', type=int, default=config.LR_PATIENCE, help='ReduceLROnPlateau 的 patience')
-    parser.add_argument('--lr_factor', type=float, default=config.LR_FACTOR, help='ReduceLROnPlateau 的 factor')
-    args = parser.parse_args()
 
-    # 检查 OBO 文件是否存在
-    if not os.path.exists(config.OBO_FILE):
-        print(f"错误: GO OBO 文件未找到于: {config.OBO_FILE}")
-        sys.exit(1)
-    if args.mapping_strategy == 'goslim' and not os.path.exists(config.SLIM_OBO_FILE):
-        print(f"错误: GO Slim OBO 文件未找到于: {config.SLIM_OBO_FILE} (当 mapping_strategy 为 goslim 时需要)")
-        sys.exit(1)
-
-    main(args)
+    cli_args = parser.parse_args()
+    main(cli_args)

@@ -7,5 +7,7 @@ checkpoints/
 uniprot_sprot.dat
 large_scale_features/
 features/
+output/
+prepared_data/
 *.pyc
 

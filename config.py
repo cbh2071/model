@@ -15,7 +15,7 @@ SLIM_OBO_FILE = os.path.join(_PROJECT_DIR, "goslim_pir.obo") # GO Slim 文件路
 INPUT_DATA_FILE = os.path.join(_PROJECT_DIR, "dataset_50k.xlsx") # 输入数据文件 (.xlsx 或 .dat)，将在 main.py 通过参数传入
 TEST_DATA_FILE = os.path.join(_PROJECT_DIR, "test_data.xlsx") # 测试数据文件 (.xlsx 或 .dat)，将在 evaluate_trained_model.py 通过参数传入
 MODEL_PATH = os.path.join(_PROJECT_DIR, "protein_ensemble_model.pth") # 模型保存路径，将在 evaluate_trained_model.py 通过参数传入
-
+GO_COL_NAME = "Gene Ontology (molecular function)" # Excel中GO注释列名，将在 prepare_data_and_split.py 通过参数传入
 
 # --- 自动生成或固定的路径 ---
 CACHE_DIR = os.path.join(_PROJECT_DIR, "protbert_features_cache") # ProtBERT 特征缓存目录
@@ -23,6 +23,10 @@ MODEL_SAVE_PATH = os.path.join(_PROJECT_DIR, "protein_ensemble_model.pth") # 模
 DISTRIBUTION_FILE_PREFIX = os.path.join(_PROJECT_DIR, "") # 标签分布文件保存目录（或加前缀）
 CHECKPOINT_DIR = os.path.join(_PROJECT_DIR, "checkpoints") # 检查点保存目录
 RESULTS_DIR = os.path.join(_PROJECT_DIR, "results") # 结果保存目录
+RESUME_CHECKPOINT_BILSTM = os.path.join(_PROJECT_DIR, "checkpoints", "bilstm_model.pth") # BiLSTM 检查点路径
+RESUME_CHECKPOINT_CNNLSTM = os.path.join(_PROJECT_DIR, "checkpoints", "cnnlstm_model.pth") # CNN_BiLSTM 检查点路径
+PREPARED_DATA_DIR = os.path.join(_PROJECT_DIR, "prepared_data") # 预处理和划分好的数据目录
+OUTPUT_DIR = os.path.join(_PROJECT_DIR, "output") # 输出目录
 
 # --- ProtBERT 模型 ---
 PROTBERT_MODEL_NAME = "Rostlab/prot_bert"
