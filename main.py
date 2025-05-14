@@ -14,6 +14,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
 from goatools.obo_parser import GODag
+import pickle
+from tqdm import tqdm
 
 # --- 导入自定义模块 ---
 # 添加项目根目录到 Python 路径，以便导入模块
@@ -30,6 +32,14 @@ from feature_extractor import extract_protbert_features_batch # 导入特征提�
 from datasets import ProteinFeatureDataset # 导入 Dataset
 from models import BiLSTMAttention, CNN_BiLSTM, EnsembleModel # 导入模型
 from training_utils import train_model, evaluate_model # 导入训练/评估工具
+
+def load_prepared_data(data_dir: str, split_name: str) -> Tuple[List[str], List[np.ndarray], np.ndarray]:
+    """加载预处理和划分好的数据"""
+    ids = np.load(os.path.join(data_dir, f"{split_name}_ids.npy"), allow_pickle=True).tolist()
+    features = np.load(os.path.join(data_dir, f"{split_name}_features.npy"), allow_pickle=True)
+    features_list = [feat for feat in features]
+    labels = np.load(os.path.join(data_dir, f"{split_name}_labels.npy"), allow_pickle=True)
+    return ids, features_list, labels
 
 def main(args):
     """主执行流程"""
@@ -338,7 +348,7 @@ def main(args):
         else:
             print(f"警告: 指定的检查点文件未找到: {args.resume_checkpoint}")
 
-    _, _, model_bilstm = train_model(
+    _, train_losses_bilstm, val_losses_bilstm, model_bilstm = train_model(
         model=model_bilstm, train_loader=train_loader, val_loader=val_loader,
         optimizer=optimizer_bilstm, criterion=criterion,
         num_epochs=args.num_epochs, # 总 epoch 数不变
@@ -382,7 +392,7 @@ def main(args):
         else:
             print(f"警告: 指定的检查点文件未找到: {args.resume_checkpoint}")
 
-    _, _, model_cnnlstm = train_model(
+    _, train_losses_cnnlstm, val_losses_cnnlstm, model_cnnlstm = train_model(
         model=model_cnnlstm, train_loader=train_loader, val_loader=val_loader,
         optimizer=optimizer_cnnlstm, criterion=criterion,
         num_epochs=args.num_epochs,
@@ -422,11 +432,19 @@ def main(args):
     # --- 步骤 10: 保存模型 ---
     print(f"\n--- 步骤 10: 保存模型到 {config.MODEL_SAVE_PATH} ---")
     try:
+        # 保存训练和验证损失
+        os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+        np.save(os.path.join(config.OUTPUT_DIR, "bilstm_train_losses.npy"), np.array(train_losses_bilstm))
+        np.save(os.path.join(config.OUTPUT_DIR, "bilstm_val_losses.npy"), np.array(val_losses_bilstm))
+        np.save(os.path.join(config.OUTPUT_DIR, "cnnlstm_train_losses.npy"), np.array(train_losses_cnnlstm))
+        np.save(os.path.join(config.OUTPUT_DIR, "cnnlstm_val_losses.npy"), np.array(val_losses_cnnlstm))
+
         torch.save({
             'model_bilstm_state_dict': model_bilstm.state_dict(),
             'model_cnnlstm_state_dict': model_cnnlstm.state_dict(),
             'ensemble_model_state_dict': ensemble_model.state_dict(),
             'mlb': mlb,
+            'ordered_ids': ordered_ids,  # 保存用于数据划分的ID顺序
             'model_params': {
                 'input_dim': config.INPUT_DIM, 'hidden_dim': config.HIDDEN_DIM,
                 'output_dim': num_classes, 'num_lstm_layers': config.NUM_LSTM_LAYERS,
@@ -435,6 +453,7 @@ def main(args):
             },
             'mapping_strategy': args.mapping_strategy,
             'target_go_category': args.target_go_category,
+            'training_args': vars(args),  # 保存训练参数
         }, config.MODEL_SAVE_PATH)
         print("模型和标签编码器保存成功。")
     except Exception as e:
