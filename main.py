@@ -158,7 +158,7 @@ def main(args):
     checkpoint_dir_bilstm = os.path.join(config.CHECKPOINT_DIR, "bilstm_from_prepared_data")
     os.makedirs(checkpoint_dir_bilstm, exist_ok=True)
 
-    _, train_losses_bilstm, val_losses_bilstm, model_bilstm = train_model(
+    train_losses_bilstm, val_losses_bilstm, model_bilstm_trained = train_model(
         model=model_bilstm,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -173,6 +173,8 @@ def main(args):
         start_epoch=start_epoch_bilstm,
         scheduler=scheduler_bilstm
     )
+    model_bilstm = model_bilstm_trained
+
 
     # --- 训练 CNN+BiLSTM ---
     model_cnnlstm = CNN_BiLSTM(
@@ -210,7 +212,7 @@ def main(args):
     checkpoint_dir_cnnlstm = os.path.join(config.CHECKPOINT_DIR, "cnnlstm_from_prepared_data")
     os.makedirs(checkpoint_dir_cnnlstm, exist_ok=True)
 
-    _, train_losses_cnnlstm, val_losses_cnnlstm, model_cnnlstm = train_model(
+    train_losses_cnnlstm, val_losses_cnnlstm, model_cnnlstm_trained = train_model(
         model=model_cnnlstm,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -225,6 +227,7 @@ def main(args):
         start_epoch=start_epoch_cnnlstm,
         scheduler=scheduler_cnnlstm
     )
+    model_cnnlstm = model_cnnlstm_trained
 
     # --- 步骤 5: 保存最终训练好的模型 ---
     print(f"\n--- 保存最终训练模型到 {config.MODEL_SAVE_PATH} (基于固定划分训练) ---")
