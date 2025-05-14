@@ -44,17 +44,23 @@ TARGET_MF_CLASSES = {
 
 # --- 训练参数 ---
 BATCH_SIZE = 16             # 批次大小 (可根据显存调整)
-NUM_EPOCHS = 200             # 训练轮数
-LEARNING_RATE = 1e-4
+NUM_EPOCHS = 200            # 训练轮数
+LEARNING_RATE = 1e-4        # 学习率
 TEST_SIZE = 0.2             # 测试集比例
 VAL_SIZE = 0.1              # 验证集比例 (在训练集中划分)
 ENSEMBLE_WEIGHT_A = 0.6     # 集成模型中 BiLSTM 的权重 (模型A)
-EARLY_STOPPING_PATIENCE = 7 # 早停策略的耐心值
+EARLY_STOPPING_PATIENCE = 5 # 早停策略的耐心值
 EARLY_STOPPING_MIN_DELTA = 0.005 # 早停策略的最小变化值
+ALPHA = 0.5                 # 类别权重缩放因子
+LR_SCHEDULER = 'reducelronplateau' # 学习率调度器
+LR_STEP_SIZE = 10           # StepLR 的 step_size
+LR_GAMMA = 0.1              # StepLR/ExponentialLR 的 gamma
+LR_PATIENCE = 3             # ReduceLROnPlateau 的 patience
+LR_FACTOR = 0.1             # ReduceLROnPlateau 的 factor
 
 # --- 模型超参数 ---
 INPUT_DIM = 1024            # ProtBERT 输出特征维度
-HIDDEN_DIM = 256            # LSTM/CNN 隐藏层维度
+HIDDEN_DIM = 512            # LSTM/CNN 隐藏层维度
 NUM_LSTM_LAYERS = 2         # BiLSTM 层数
 CNN_KERNEL_SIZE = 3         # CNN 卷积核大小
 

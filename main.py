@@ -287,8 +287,9 @@ def main(args):
                 print(f"警告: 类别 '{mlb.classes_[i]}' 在训练集中没有负样本。pos_weight 将被设为 1.0。")
                 pos_weight_values_train[i] = 1.0
 
-
-        pos_weight_tensor = torch.tensor(pos_weight_values_train, dtype=torch.float32).to(config.DEVICE)
+        alpha = config.ALPHA # 或者 1.2 等，可以尝试不同的值
+        pos_weight_values_train_scaled = pos_weight_values_train * alpha
+        pos_weight_tensor = torch.tensor(pos_weight_values_train_scaled, dtype=torch.float32).to(config.DEVICE)
         print(f"基于训练集计算得到的 pos_weight (前10个): {pos_weight_values_train[:10]}")
         print(f"pos_weight 张量设备: {pos_weight_tensor.device}")
     else:
@@ -312,13 +313,16 @@ def main(args):
     )
     model_bilstm.to(config.DEVICE) # 先移动到设备
     optimizer_bilstm = torch.optim.Adam(model_bilstm.parameters(), lr=args.learning_rate)
-    _, _, model_bilstm = train_model(
-        model=model_bilstm, train_loader=train_loader, val_loader=val_loader,
-        optimizer=optimizer_bilstm, criterion=criterion, num_epochs=args.num_epochs,
-        device=config.DEVICE, model_name="BiLSTM_Attention",
-        patience=args.early_stopping_patience,
-        min_delta=args.early_stopping_min_delta
-    )
+
+    # 添加学习率调度器
+    scheduler_bilstm = None
+    if args.lr_scheduler == 'step':
+        scheduler_bilstm = torch.optim.lr_scheduler.StepLR(optimizer_bilstm, step_size=args.lr_step_size, gamma=args.lr_gamma)
+    elif args.lr_scheduler == 'cosine':
+        scheduler_bilstm = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_bilstm, T_max=args.num_epochs, eta_min=1e-6)
+    elif args.lr_scheduler == 'reducelronplateau':
+        scheduler_bilstm = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_bilstm, mode='min', factor=args.lr_factor,
+                                             patience=args.lr_patience, verbose=True, min_lr=1e-7)
 
     start_epoch_bilstm = 0
     if args.resume_checkpoint and "BiLSTM_Attention" in args.resume_checkpoint: # 简单判断是否是该模型的检查点
@@ -327,8 +331,9 @@ def main(args):
             checkpoint = torch.load(args.resume_checkpoint, map_location=config.DEVICE) # 加载到指定设备
             model_bilstm.load_state_dict(checkpoint['model_state_dict'])
             optimizer_bilstm.load_state_dict(checkpoint['optimizer_state_dict'])
+            if scheduler_bilstm is not None and 'scheduler_state_dict' in checkpoint:
+                scheduler_bilstm.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch_bilstm = checkpoint['epoch'] # 下一个epoch从这里开始
-            # best_val_loss_bilstm = checkpoint.get('best_val_loss', float('inf')) # 可选：恢复最佳损失记录
             print(f"  模型权重和优化器状态已加载。将从 epoch {start_epoch_bilstm + 1} 继续训练。")
         else:
             print(f"警告: 指定的检查点文件未找到: {args.resume_checkpoint}")
@@ -341,7 +346,8 @@ def main(args):
         patience=args.early_stopping_patience,
         min_delta=args.early_stopping_min_delta,
         checkpoint_dir=os.path.join(config.CHECKPOINT_DIR, "bilstm"), # 为不同模型指定不同检查点子目录
-        start_epoch=start_epoch_bilstm # 传递起始 epoch
+        start_epoch=start_epoch_bilstm, # 传递起始 epoch
+        scheduler=scheduler_bilstm # 添加学习率调度器
     )
 
     # --- 训练 CNN+BiLSTM ---
@@ -351,13 +357,16 @@ def main(args):
     )
     model_cnnlstm.to(config.DEVICE) # 先移动到设备
     optimizer_cnnlstm = torch.optim.Adam(model_cnnlstm.parameters(), lr=args.learning_rate)
-    _, _, model_cnnlstm = train_model(
-        model=model_cnnlstm, train_loader=train_loader, val_loader=val_loader,
-        optimizer=optimizer_cnnlstm, criterion=criterion, num_epochs=args.num_epochs,
-        device=config.DEVICE, model_name="CNN_BiLSTM",
-        patience=args.early_stopping_patience, # 从命令行参数获取
-        min_delta=args.early_stopping_min_delta # 从命令行参数获取
-    )
+
+    # 添加学习率调度器
+    scheduler_cnnlstm = None
+    if args.lr_scheduler == 'step':
+        scheduler_cnnlstm = torch.optim.lr_scheduler.StepLR(optimizer_cnnlstm, step_size=args.lr_step_size, gamma=args.lr_gamma)
+    elif args.lr_scheduler == 'cosine':
+        scheduler_cnnlstm = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_cnnlstm, T_max=args.num_epochs, eta_min=1e-6)
+    elif args.lr_scheduler == 'reducelronplateau':
+        scheduler_cnnlstm = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_cnnlstm, mode='min', factor=args.lr_factor,
+                                             patience=args.lr_patience, verbose=True, min_lr=1e-7)
 
     start_epoch_cnnlstm = 0
     if args.resume_checkpoint and "CNN_BiLSTM" in args.resume_checkpoint:
@@ -366,6 +375,8 @@ def main(args):
             checkpoint = torch.load(args.resume_checkpoint, map_location=config.DEVICE)
             model_cnnlstm.load_state_dict(checkpoint['model_state_dict'])
             optimizer_cnnlstm.load_state_dict(checkpoint['optimizer_state_dict'])
+            if scheduler_cnnlstm is not None and 'scheduler_state_dict' in checkpoint:
+                scheduler_cnnlstm.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch_cnnlstm = checkpoint['epoch']
             print(f"  模型权重和优化器状态已加载。将从 epoch {start_epoch_cnnlstm + 1} 继续训练。")
         else:
@@ -379,7 +390,8 @@ def main(args):
         patience=args.early_stopping_patience,
         min_delta=args.early_stopping_min_delta,
         checkpoint_dir=os.path.join(config.CHECKPOINT_DIR, "cnnlstm"),
-        start_epoch=start_epoch_cnnlstm
+        start_epoch=start_epoch_cnnlstm,
+        scheduler=scheduler_cnnlstm # 添加学习率调度器
     )
 
     # --- 步骤 9: 集成与评估 ---
@@ -448,7 +460,11 @@ if __name__ == "__main__":
     parser.add_argument('--early_stopping_patience', type=int, default=config.EARLY_STOPPING_PATIENCE, help=f'早停策略的耐心值 (default: {config.EARLY_STOPPING_PATIENCE})')
     parser.add_argument('--early_stopping_min_delta', type=float, default=config.EARLY_STOPPING_MIN_DELTA, help=f'早停策略的最小变化值 (default: {config.EARLY_STOPPING_MIN_DELTA})')
     parser.add_argument('--resume_checkpoint', type=str, default=config.CHECKPOINT_DIR, help=f'检查点保存目录 (default: {config.CHECKPOINT_DIR})')
-
+    parser.add_argument('--lr_scheduler', type=str, default=config.LR_SCHEDULER, choices=['none', 'step', 'cosine', 'reducelronplateau'], help='选择学习率调度器策略')
+    parser.add_argument('--lr_step_size', type=int, default=config.LR_STEP_SIZE, help='StepLR 的 step_size')
+    parser.add_argument('--lr_gamma', type=float, default=config.LR_GAMMA, help='StepLR/ExponentialLR 的 gamma')
+    parser.add_argument('--lr_patience', type=int, default=config.LR_PATIENCE, help='ReduceLROnPlateau 的 patience')
+    parser.add_argument('--lr_factor', type=float, default=config.LR_FACTOR, help='ReduceLROnPlateau 的 factor')
     args = parser.parse_args()
 
     # 检查 OBO 文件是否存在

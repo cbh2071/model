@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score, accuracy_score # accuracy_score 在多标签中是 exact match ratio
 from tqdm.auto import tqdm
 from sklearn.preprocessing import MultiLabelBinarizer
+from torch.optim.lr_scheduler import ReduceLROnPlateau # 确保导入
 
 
 def train_model(
@@ -26,7 +27,8 @@ def train_model(
     patience: int = 5, # 新增：Early Stopping 的耐心值
     min_delta: float = 0.001, # 新增：认为损失改善的最小变化量
     checkpoint_dir: str = "checkpoints", # 新增：检查点保存目录
-    start_epoch: int = 0 # 新增：从哪个epoch开始 (用于继续训练)
+    start_epoch: int = 0, # 新增：从哪个epoch开始 (用于继续训练)
+    scheduler: torch.optim.lr_scheduler._LRScheduler = None # 新增：学习率调度器
 ) -> Tuple[List[float], List[float], nn.Module]: # 返回训练好的最佳模型
     """训练单个模型，并实现 Early Stopping。"""
     print(f"\n--- 开始训练 {model_name} (Early Stopping: patience={patience}, min_delta={min_delta}) ---")
@@ -39,7 +41,7 @@ def train_model(
     best_model_state_dict = model.state_dict() # 初始化最佳模型状态
     os.makedirs(checkpoint_dir, exist_ok=True) # 创建检查点目录
 
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         model.train()
         running_loss = 0.0
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [训练]", leave=False)
@@ -71,19 +73,28 @@ def train_model(
         epoch_val_loss = val_loss / len(val_loader.dataset)
         val_losses.append(epoch_val_loss)
 
-        print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}")
+        print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.1e}")
+        
+        # --- 更新学习率 ---
+        if scheduler:
+            if isinstance(scheduler, ReduceLROnPlateau):
+                scheduler.step(epoch_val_loss) # ReduceLROnPlateau 需要监控指标
+            else:
+                scheduler.step() # 其他调度器在 epoch 结束时 step
         
         # --- 保存当前 epoch 的检查点 ---
         checkpoint_path = os.path.join(checkpoint_dir, f"{model_name}_epoch_{epoch+1}.pth")
-        torch.save({
+        checkpoint = {
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'train_loss': epoch_train_loss,
             'val_loss': epoch_val_loss,
-            'best_val_loss': best_val_loss, # 可以保存当前的最佳验证损失
-            # 'best_model_state_dict': best_model_state_dict # 如果也想保存最佳模型在检查点中
-        }, checkpoint_path)
+            'best_val_loss': best_val_loss,
+        }
+        if scheduler is not None:
+            checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+        torch.save(checkpoint, checkpoint_path)
         print(f"  (检查点已保存到 {checkpoint_path})")
 
         # --- Early Stopping 检查 ---

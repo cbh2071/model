@@ -4,5 +4,8 @@ protbert_features_cache/
 __pycache__/
 回收站/
 checkpoints/
+uniprot_sprot.dat
+large_scale_features/
+features/
 *.pyc
 
